@@ -13,7 +13,11 @@ use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
 
 #[derive(Parser)]
-#[command(name = "utter", version, about = "Local push-to-talk voice dictation")]
+#[command(
+    name = "utter",
+    version = concat!(env!("CARGO_PKG_VERSION"), "+", env!("UTTER_GIT_SHA")),
+    about = "Local push-to-talk voice dictation"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
