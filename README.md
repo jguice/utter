@@ -4,7 +4,13 @@ Local, no-cloud push-to-talk dictation for Linux. Hold a key, speak, release —
 
 Uses [NVIDIA Parakeet-TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (INT8 ONNX) for speech recognition, runs entirely offline, ~50× faster than real-time on a modern laptop CPU (measured ~150 ms for a 4-second utterance on an M2 Max).
 
-Built because existing dictation tools (Whispering, OpenWhispr, etc.) don't ship aarch64 Linux binaries, and when we tried building them from source we couldn't get working push-to-talk on Wayland — `keyd` and Tauri's global-shortcut plugin only fire on key-down, so true hold-to-talk (record on press, stop on release) wasn't possible. utter solves that by reading evdev directly, so it sees real key press *and* release events from the kernel, and pasting via `ydotool` so it also works under KDE where the `zwp_virtual_keyboard_v1` protocol is blocked.
+**What utter does:**
+
+- **True hold-to-talk.** Press the key, speak, release — the transcription appears. Key press *and* release are both read directly from the kernel via evdev, so the interaction feels immediate and doesn't depend on the compositor cooperating.
+- **Fully local.** No cloud, no API keys, no telemetry, no server process. The Parakeet model runs entirely on your device.
+- **Fast.** ~150 ms to transcribe 4 seconds of audio on a modern CPU — roughly 50× faster than real-time.
+- **Compositor-agnostic.** Paste goes through ydotool's `uinput` layer, so text lands in the focused window regardless of whether you're on KDE, GNOME, Sway, or any other Wayland desktop.
+- **Cross-architecture.** Prebuilt `.deb` and `.rpm` packages for both `aarch64` (Apple Silicon / Snapdragon / Ampere / Pi) and `x86_64`.
 
 ## Requirements
 
