@@ -102,7 +102,12 @@ Hold the push-to-talk key, speak, release. The transcription pastes into whichev
 
 ## Configuration
 
-All configuration is via systemd service environment variables. To change any of them, run `systemctl --user edit utter-daemon` (or `utter-watcher`) and add an `[Service]` block with the overrides.
+utter runs as two systemd user services, each handling different concerns:
+
+- **`utter-daemon`** — loads the model, records audio, transcribes, pastes. Owns all the output-side environment variables in the table below.
+- **`utter-watcher`** — watches `/dev/input` for key events. Its only knob is which key triggers recording (`--key <name>` in its `ExecStart`); see [Change the push-to-talk key](#change-the-push-to-talk-key).
+
+To change any of the env vars below, run `systemctl --user edit utter-daemon` and add an `[Service]` block with the overrides.
 
 | Env var                  | Values                                         | Default          | Purpose                                                                 |
 |--------------------------|------------------------------------------------|------------------|-------------------------------------------------------------------------|
