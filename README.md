@@ -31,7 +31,7 @@ English-only — Parakeet is English-only. For multilingual, swap in Whisper via
 curl -fsSL https://raw.githubusercontent.com/jguice/utter/main/scripts/install-release.sh | bash
 ```
 
-Detects your distro + arch, downloads the matching `.rpm` or `.deb` from the latest GitHub release, installs via `dnf`/`apt`, fetches the Parakeet model into your XDG data dir, and starts the services. Run as your regular user (the script invokes `sudo` internally); takes 2–5 minutes over a decent connection.
+Detects your distro + arch, downloads the matching `.rpm` or `.deb` from the latest GitHub release, installs via `dnf`/`apt`, fetches the Parakeet model into your XDG data dir, and starts the services. Run as your regular user (the script invokes `sudo` internally); takes 2–5 minutes over a decent connection. Nothing else to do afterward — hold the key and speak.
 
 Supported out of the box: **Fedora** (incl. Asahi Remix), **RHEL** / **CentOS** / **Rocky** / **Alma** / **Nobara**, **Debian**, **Ubuntu** (incl. Pop, Mint, KDE Neon). Both `x86_64` and `aarch64`.
 
@@ -63,7 +63,7 @@ sudo apt install ./utter_*.deb
 
 The package pulls in its runtime deps (`ydotool`, `alsa-utils`, `wl-clipboard`, `libnotify`), drops a udev rule for keyboard access via `uaccess` (no `usermod` needed), registers systemd user services, and configures the ydotool socket.
 
-After install, download the model and start the services (one time):
+Unlike the one-liner above, the manual path doesn't download the model or start the services — do those yourself now:
 
 ```bash
 /usr/share/utter/download-model.sh
@@ -143,7 +143,13 @@ capslock f1..f20
 
 Apple-friendly aliases also work: `rightcmd`, `leftcmd`, `rightoption`, `leftoption`.
 
-For from-source installs the binary path is `%h/.cargo/bin/utter` instead of `/usr/bin/utter`. Save and exit; the watcher restarts automatically.
+Save and exit, then restart the watcher:
+
+```bash
+systemctl --user restart utter-watcher
+```
+
+(For from-source installs, the binary path in the `ExecStart` is `%h/.cargo/bin/utter` instead of `/usr/bin/utter`.)
 
 ## Architecture
 
@@ -154,10 +160,10 @@ evdev ──► key event (press/release)
                                            │
                                            ▼
                                ┌─── utter daemon ───┐
-                               │ ┌──────┐  ┌────────────┐ │
-                               │ │ Pkr  │  │  arecord   │ │
-                               │ │ ONNX │  │  subproc   │ │
-                               │ └──────┘  └────────────┘ │
+                               │ ┌──────────┐  ┌──────────┐ │
+                               │ │ Parakeet │  │ arecord  │ │
+                               │ │   ONNX   │  │ subproc  │ │
+                               │ └──────────┘  └──────────┘ │
                                └─────────────┬─────────────┘
                                              │
                                              ▼
