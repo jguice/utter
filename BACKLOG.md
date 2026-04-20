@@ -29,9 +29,10 @@ Deferred improvements. Not urgent, but worth capturing.
 
 ## Packaging
 
-v0.4.0 ships prebuilt `.deb` and `.rpm` (both arm64 and amd64) as
-GitHub release assets via nfpm + GitHub Actions. The remaining wins
-are about discoverability and auto-updates:
+v0.1.0 ships prebuilt `.deb` and `.rpm` (both arm64 and amd64) as
+GitHub release assets via nfpm + GitHub Actions, plus a one-liner
+installer (`scripts/install-release.sh`). The remaining wins are
+about discoverability and auto-updates:
 
 - **COPR repo (Fedora).** `sudo dnf copr enable jguice/utter &&
   sudo dnf install utter` adds auto-updates via `dnf`. The spec file
@@ -62,7 +63,7 @@ are about discoverability and auto-updates:
 
 ## Model / quality
 
-- **Local-LLM cleanup (tier 2).** First pass shipped in v0.3.0 — a
+- **Local-LLM cleanup (tier 2).** Tier 1 (regex) ships today — a
   token-scan drops fillers (uh/um/er/ah/erm/hmm), collapses 3+
   same-word repetitions, and folds short-token stutters into the full
   word that follows ("wh wh wh what" → "what"). Handles the obvious
