@@ -40,7 +40,10 @@ enum Cmd {
     /// Watch /dev/input for hold-to-talk: start on key down, stop on key up.
     /// Requires the running user to be in the `input` group.
     Watch {
-        /// Key name (e.g. rightmeta, leftmeta, rightctrl, capslock, f13).
+        /// Key to watch. Either a named alias (rightmeta, leftmeta, rightctrl,
+        /// capslock, f1..f20, Apple aliases rightcmd/leftcmd/rightoption/etc.)
+        /// or a raw evdev keycode as digits (e.g. `--key 70` for scroll lock,
+        /// `--key 194` for f24). `utter set-key` picks one interactively.
         #[arg(long, default_value = "rightmeta")]
         key: String,
     },
@@ -577,13 +580,14 @@ async fn notify(summary: &str, body: &str, expire_ms: u64) {
         .await;
 }
 
-/// Canonical short name for an evdev keycode. Inverse of `parse_key_name`
-/// for the subset of keys we can reliably use for push-to-talk (modifiers,
-/// capslock, F1–F20). Returns None for letter keys, number keys, etc. —
-/// those work technically but are terrible PTT choices because every
-/// keypress during normal typing would start/stop a recording.
+/// Canonical short name for an evdev keycode. Used for pretty display in
+/// the config file and CLI output. Anything not listed here still works —
+/// it just gets stored as the raw numeric keycode instead. The set below
+/// deliberately covers keys that are plausible push-to-talk choices (they
+/// don't fire during normal typing); it's not a completeness statement.
 fn canonical_name_for(code: evdev::KeyCode) -> Option<&'static str> {
     Some(match code {
+        // Modifiers
         evdev::KeyCode::KEY_RIGHTMETA => "rightmeta",
         evdev::KeyCode::KEY_LEFTMETA => "leftmeta",
         evdev::KeyCode::KEY_RIGHTCTRL => "rightctrl",
@@ -592,7 +596,21 @@ fn canonical_name_for(code: evdev::KeyCode) -> Option<&'static str> {
         evdev::KeyCode::KEY_LEFTALT => "leftalt",
         evdev::KeyCode::KEY_RIGHTSHIFT => "rightshift",
         evdev::KeyCode::KEY_LEFTSHIFT => "leftshift",
+        // Lock keys — common PTT picks because they're otherwise unused on most setups
         evdev::KeyCode::KEY_CAPSLOCK => "capslock",
+        evdev::KeyCode::KEY_SCROLLLOCK => "scrolllock",
+        evdev::KeyCode::KEY_NUMLOCK => "numlock",
+        // Top-row utility keys
+        evdev::KeyCode::KEY_PAUSE => "pause",
+        evdev::KeyCode::KEY_SYSRQ => "printscreen",
+        evdev::KeyCode::KEY_INSERT => "insert",
+        evdev::KeyCode::KEY_COMPOSE => "menu",
+        // Navigation cluster
+        evdev::KeyCode::KEY_HOME => "home",
+        evdev::KeyCode::KEY_END => "end",
+        evdev::KeyCode::KEY_PAGEUP => "pageup",
+        evdev::KeyCode::KEY_PAGEDOWN => "pagedown",
+        // Function row — common QMK/keyd target for remapped layer keys
         evdev::KeyCode::KEY_F1 => "f1",
         evdev::KeyCode::KEY_F2 => "f2",
         evdev::KeyCode::KEY_F3 => "f3",
@@ -613,6 +631,10 @@ fn canonical_name_for(code: evdev::KeyCode) -> Option<&'static str> {
         evdev::KeyCode::KEY_F18 => "f18",
         evdev::KeyCode::KEY_F19 => "f19",
         evdev::KeyCode::KEY_F20 => "f20",
+        evdev::KeyCode::KEY_F21 => "f21",
+        evdev::KeyCode::KEY_F22 => "f22",
+        evdev::KeyCode::KEY_F23 => "f23",
+        evdev::KeyCode::KEY_F24 => "f24",
         _ => return None,
     })
 }
@@ -620,39 +642,70 @@ fn canonical_name_for(code: evdev::KeyCode) -> Option<&'static str> {
 fn parse_key_name(name: &str) -> Result<evdev::KeyCode> {
     let n = name.to_ascii_lowercase();
     let n = n.strip_prefix("key_").unwrap_or(&n);
-    let code = match n {
-        "rightmeta" | "rightsuper" | "rightcmd" | "rightcommand" => evdev::KeyCode::KEY_RIGHTMETA,
-        "leftmeta" | "leftsuper" | "leftcmd" | "leftcommand" => evdev::KeyCode::KEY_LEFTMETA,
-        "rightctrl" | "rightcontrol" => evdev::KeyCode::KEY_RIGHTCTRL,
-        "leftctrl" | "leftcontrol" => evdev::KeyCode::KEY_LEFTCTRL,
-        "rightalt" | "rightoption" => evdev::KeyCode::KEY_RIGHTALT,
-        "leftalt" | "leftoption" => evdev::KeyCode::KEY_LEFTALT,
-        "rightshift" => evdev::KeyCode::KEY_RIGHTSHIFT,
-        "leftshift" => evdev::KeyCode::KEY_LEFTSHIFT,
-        "capslock" => evdev::KeyCode::KEY_CAPSLOCK,
-        "f1" => evdev::KeyCode::KEY_F1,
-        "f2" => evdev::KeyCode::KEY_F2,
-        "f3" => evdev::KeyCode::KEY_F3,
-        "f4" => evdev::KeyCode::KEY_F4,
-        "f5" => evdev::KeyCode::KEY_F5,
-        "f6" => evdev::KeyCode::KEY_F6,
-        "f7" => evdev::KeyCode::KEY_F7,
-        "f8" => evdev::KeyCode::KEY_F8,
-        "f9" => evdev::KeyCode::KEY_F9,
-        "f10" => evdev::KeyCode::KEY_F10,
-        "f11" => evdev::KeyCode::KEY_F11,
-        "f12" => evdev::KeyCode::KEY_F12,
-        "f13" => evdev::KeyCode::KEY_F13,
-        "f14" => evdev::KeyCode::KEY_F14,
-        "f15" => evdev::KeyCode::KEY_F15,
-        "f16" => evdev::KeyCode::KEY_F16,
-        "f17" => evdev::KeyCode::KEY_F17,
-        "f18" => evdev::KeyCode::KEY_F18,
-        "f19" => evdev::KeyCode::KEY_F19,
-        "f20" => evdev::KeyCode::KEY_F20,
-        other => return Err(anyhow!("unknown key name: {other}")),
+
+    // Named aliases for common PTT-worthy keys. Everything not listed here
+    // can still be used — see the numeric-code fallback below.
+    let named = match n {
+        "rightmeta" | "rightsuper" | "rightcmd" | "rightcommand" => Some(evdev::KeyCode::KEY_RIGHTMETA),
+        "leftmeta" | "leftsuper" | "leftcmd" | "leftcommand" => Some(evdev::KeyCode::KEY_LEFTMETA),
+        "rightctrl" | "rightcontrol" => Some(evdev::KeyCode::KEY_RIGHTCTRL),
+        "leftctrl" | "leftcontrol" => Some(evdev::KeyCode::KEY_LEFTCTRL),
+        "rightalt" | "rightoption" => Some(evdev::KeyCode::KEY_RIGHTALT),
+        "leftalt" | "leftoption" => Some(evdev::KeyCode::KEY_LEFTALT),
+        "rightshift" => Some(evdev::KeyCode::KEY_RIGHTSHIFT),
+        "leftshift" => Some(evdev::KeyCode::KEY_LEFTSHIFT),
+        "capslock" | "caps" => Some(evdev::KeyCode::KEY_CAPSLOCK),
+        "scrolllock" | "scroll_lock" | "scroll" => Some(evdev::KeyCode::KEY_SCROLLLOCK),
+        "numlock" | "num_lock" => Some(evdev::KeyCode::KEY_NUMLOCK),
+        "pause" | "break" => Some(evdev::KeyCode::KEY_PAUSE),
+        "printscreen" | "prtsc" | "prtscn" | "sysrq" => Some(evdev::KeyCode::KEY_SYSRQ),
+        "insert" | "ins" => Some(evdev::KeyCode::KEY_INSERT),
+        "menu" | "compose" | "contextmenu" | "context_menu" => Some(evdev::KeyCode::KEY_COMPOSE),
+        "home" => Some(evdev::KeyCode::KEY_HOME),
+        "end" => Some(evdev::KeyCode::KEY_END),
+        "pageup" | "pgup" | "page_up" => Some(evdev::KeyCode::KEY_PAGEUP),
+        "pagedown" | "pgdn" | "page_down" => Some(evdev::KeyCode::KEY_PAGEDOWN),
+        "f1" => Some(evdev::KeyCode::KEY_F1),
+        "f2" => Some(evdev::KeyCode::KEY_F2),
+        "f3" => Some(evdev::KeyCode::KEY_F3),
+        "f4" => Some(evdev::KeyCode::KEY_F4),
+        "f5" => Some(evdev::KeyCode::KEY_F5),
+        "f6" => Some(evdev::KeyCode::KEY_F6),
+        "f7" => Some(evdev::KeyCode::KEY_F7),
+        "f8" => Some(evdev::KeyCode::KEY_F8),
+        "f9" => Some(evdev::KeyCode::KEY_F9),
+        "f10" => Some(evdev::KeyCode::KEY_F10),
+        "f11" => Some(evdev::KeyCode::KEY_F11),
+        "f12" => Some(evdev::KeyCode::KEY_F12),
+        "f13" => Some(evdev::KeyCode::KEY_F13),
+        "f14" => Some(evdev::KeyCode::KEY_F14),
+        "f15" => Some(evdev::KeyCode::KEY_F15),
+        "f16" => Some(evdev::KeyCode::KEY_F16),
+        "f17" => Some(evdev::KeyCode::KEY_F17),
+        "f18" => Some(evdev::KeyCode::KEY_F18),
+        "f19" => Some(evdev::KeyCode::KEY_F19),
+        "f20" => Some(evdev::KeyCode::KEY_F20),
+        "f21" => Some(evdev::KeyCode::KEY_F21),
+        "f22" => Some(evdev::KeyCode::KEY_F22),
+        "f23" => Some(evdev::KeyCode::KEY_F23),
+        "f24" => Some(evdev::KeyCode::KEY_F24),
+        _ => None,
     };
-    Ok(code)
+    if let Some(code) = named {
+        return Ok(code);
+    }
+
+    // Numeric fallback — accept any raw evdev keycode as digits. Lets people
+    // use keys utter doesn't have a short name for (scroll lock, pause,
+    // F21-F24, media keys, remapped firmware layers, etc.) without us
+    // needing to enumerate them.
+    if let Ok(code) = n.parse::<u16>() {
+        return Ok(evdev::KeyCode::new(code));
+    }
+
+    Err(anyhow!(
+        "unknown key name: `{name}` (not a named alias and not a numeric evdev code)"
+    ))
 }
 
 async fn run_watcher(key_name: &str) -> Result<()> {
@@ -855,23 +908,25 @@ async fn pick_key_and_maybe_save(dry_run: bool, timeout_secs: u64) -> Result<()>
         .map_err(|_| anyhow!("timed out — no key press + release captured"))?
         .ok_or_else(|| anyhow!("no key detected"))?;
 
-    let name = canonical_name_for(code).ok_or_else(|| {
-        anyhow!(
-            "detected key with code {} but utter doesn't have a short name for it. \
-             Modifier keys (ctrl/alt/meta/shift), capslock, and F1-F20 are the \
-             supported set — pick one of those for push-to-talk.",
-            code.code()
-        )
-    })?;
+    // Prefer the canonical short name when we have one (rightmeta, capslock,
+    // f13, ...). Fall back to the raw numeric code for keys we don't have
+    // an alias for — everything works at the evdev level regardless of
+    // whether utter knows a short name for it.
+    let name: String = canonical_name_for(code)
+        .map(String::from)
+        .unwrap_or_else(|| code.code().to_string());
 
-    println!("Detected: {name} (code {}). Press + release both captured — hold-to-talk will work.", code.code());
+    println!(
+        "Detected: {name} (code {}). Press + release both captured — hold-to-talk will work.",
+        code.code()
+    );
 
     if dry_run {
         eprintln!("(--dry-run: not saving.)");
         return Ok(());
     }
 
-    write_watcher_override(name)?;
+    write_watcher_override(&name)?;
     println!("Saved override for key `{name}`.");
     Ok(())
 }

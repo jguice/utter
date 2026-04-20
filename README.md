@@ -153,7 +153,14 @@ ExecStart=
 ExecStart=/usr/bin/utter watch --key capslock
 ```
 
-Valid names: `leftmeta rightmeta leftctrl rightctrl leftalt rightalt leftshift rightshift capslock f1..f20`, plus Apple-friendly aliases `rightcmd leftcmd rightoption leftoption`.
+The `--key` argument accepts either a named alias or a raw evdev keycode (as digits). Any key that exists in `/usr/include/linux/input-event-codes.h` works — the named list below is just so the common cases are readable:
+
+- **Modifiers:** `leftmeta rightmeta leftctrl rightctrl leftalt rightalt leftshift rightshift`
+- **Lock keys:** `capslock scrolllock numlock`
+- **Navigation + utility:** `home end pageup pagedown insert menu printscreen pause`
+- **Function keys:** `f1`..`f24`
+- **Apple aliases:** `rightcmd leftcmd rightoption leftoption` (map to `rightmeta` etc.)
+- **Anything else:** pass the raw evdev code as digits, e.g. `--key 70` for scroll lock, `--key 194` for F21. `utter set-key` detects whichever key you press and picks the nicer form automatically.
 
 Save, then `systemctl --user restart utter-watcher`. For from-source installs, the `ExecStart` binary path is `%h/.cargo/bin/utter` instead of `/usr/bin/utter`.
 
