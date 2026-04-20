@@ -768,10 +768,34 @@ async fn run_set_key(dry_run: bool, timeout_secs: u64) -> Result<()> {
         (false, Ok(_)) => true,
         (false, Err(_)) => watcher_was_active,
     };
-    if should_activate {
+    let restarted = if should_activate {
         // restart (= stop-if-running then start) covers both "watcher is
         // stopped" and "already running under the old config" in one call.
-        let _ = run_systemctl_user(&["restart", "utter-watcher.service"]);
+        run_systemctl_user(&["restart", "utter-watcher.service"])
+            .map(|s| s.success())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    // Only report on non-dry-run saves — dry-run prints its own message
+    // inside pick_key_and_maybe_save, and detection errors propagate via
+    // `result` to the caller.
+    if !dry_run {
+        if let Ok(()) = &result {
+            if restarted {
+                println!("Watcher restarted with the new key — hold it to dictate.");
+            } else if should_activate {
+                println!(
+                    "Saved, but `systemctl --user restart utter-watcher` failed — \
+                     start it manually once you've sorted out whatever's wrong."
+                );
+            } else {
+                // Can happen on dry-run + was-active=false, but dry-run is handled above.
+                // This branch is only reached if we chose not to activate for some other reason.
+                println!("Saved. Start the watcher with `systemctl --user start utter-watcher` to use the new key.");
+            }
+        }
     }
 
     result
@@ -848,7 +872,7 @@ async fn pick_key_and_maybe_save(dry_run: bool, timeout_secs: u64) -> Result<()>
     }
 
     write_watcher_override(name)?;
-    println!("Saved override. Watcher will use `{name}` after this command finishes.");
+    println!("Saved override for key `{name}`.");
     Ok(())
 }
 
