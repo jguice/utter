@@ -745,7 +745,7 @@ async fn send_command_quiet(cmd: &str) -> Result<()> {
 
 async fn run_set_key(dry_run: bool, timeout_secs: u64) -> Result<()> {
     // Stop the running watcher so it doesn't intercept the test key-press.
-    // Remember if it was running so we can restore state on exit.
+    // Remember if it was running so we can restore state on error / dry-run.
     let watcher_was_active = watcher_is_active();
     if watcher_was_active {
         let _ = run_systemctl_user(&["stop", "utter-watcher.service"]);
@@ -753,12 +753,25 @@ async fn run_set_key(dry_run: bool, timeout_secs: u64) -> Result<()> {
 
     let result = pick_key_and_maybe_save(dry_run, timeout_secs).await;
 
-    // Always restart the watcher if it was running before — whether we
-    // saved a new key or the user cancelled. Saving wrote the override
-    // before this runs, so restart picks up the new ExecStart automatically.
-    if watcher_was_active {
-        let _ = run_systemctl_user(&["daemon-reload"]);
-        let _ = run_systemctl_user(&["start", "utter-watcher.service"]);
+    // Reload unit files so any override.conf we just wrote is picked up.
+    let _ = run_systemctl_user(&["daemon-reload"]);
+
+    // Decide the watcher's final state:
+    //   - dry-run: restore whatever we found it in.
+    //   - real run + save succeeded: always activate. The user's explicit
+    //     intent with `utter set-key` is "use this key from now on," so
+    //     leaving the watcher stopped would be surprising — even if the
+    //     user had stopped it manually before running set-key.
+    //   - real run + detection failed: restore previous state.
+    let should_activate = match (dry_run, &result) {
+        (true, _) => watcher_was_active,
+        (false, Ok(_)) => true,
+        (false, Err(_)) => watcher_was_active,
+    };
+    if should_activate {
+        // restart (= stop-if-running then start) covers both "watcher is
+        // stopped" and "already running under the old config" in one call.
+        let _ = run_systemctl_user(&["restart", "utter-watcher.service"]);
     }
 
     result
