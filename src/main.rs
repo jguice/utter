@@ -503,8 +503,14 @@ async fn ydotool_type(text: &str) -> Result<()> {
 }
 
 async fn ydotool_keys(codes: &[&str]) -> Result<()> {
+    // Keep ydotool's documented 12ms default between key events. With 0,
+    // modifier chords (Shift+Insert, Ctrl+V, Ctrl+Shift+V) raced: on a
+    // busy compositor the main key could be interpreted before the
+    // modifier state propagated, so apps saw a bare Insert / V keystroke
+    // and pasted nothing. 3-5 events * 12ms = ~40-60ms total, which is
+    // imperceptible.
     let output = Command::new("ydotool")
-        .args(["key", "--key-delay", "0"])
+        .args(["key", "--key-delay", "12"])
         .args(codes)
         .output()
         .await?;
