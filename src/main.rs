@@ -44,6 +44,17 @@ enum Cmd {
         #[arg(long, default_value = "rightmeta")]
         key: String,
     },
+    /// Interactively pick the push-to-talk key. Stops the watcher, listens
+    /// for a press + release on any keyboard, then (unless --dry-run)
+    /// writes a systemd user override so the watcher uses that key.
+    SetKey {
+        /// Just report the detected key — don't save or restart the watcher.
+        #[arg(long)]
+        dry_run: bool,
+        /// Seconds to wait for a key press before giving up.
+        #[arg(long, default_value = "20")]
+        timeout: u64,
+    },
 }
 
 fn socket_path() -> Result<PathBuf> {
@@ -80,6 +91,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Cmd::Watch { key } => run_watcher(&key).await,
+        Cmd::SetKey { dry_run, timeout } => run_set_key(dry_run, timeout).await,
     }
 }
 
@@ -565,6 +577,46 @@ async fn notify(summary: &str, body: &str, expire_ms: u64) {
         .await;
 }
 
+/// Canonical short name for an evdev keycode. Inverse of `parse_key_name`
+/// for the subset of keys we can reliably use for push-to-talk (modifiers,
+/// capslock, F1–F20). Returns None for letter keys, number keys, etc. —
+/// those work technically but are terrible PTT choices because every
+/// keypress during normal typing would start/stop a recording.
+fn canonical_name_for(code: evdev::KeyCode) -> Option<&'static str> {
+    Some(match code {
+        evdev::KeyCode::KEY_RIGHTMETA => "rightmeta",
+        evdev::KeyCode::KEY_LEFTMETA => "leftmeta",
+        evdev::KeyCode::KEY_RIGHTCTRL => "rightctrl",
+        evdev::KeyCode::KEY_LEFTCTRL => "leftctrl",
+        evdev::KeyCode::KEY_RIGHTALT => "rightalt",
+        evdev::KeyCode::KEY_LEFTALT => "leftalt",
+        evdev::KeyCode::KEY_RIGHTSHIFT => "rightshift",
+        evdev::KeyCode::KEY_LEFTSHIFT => "leftshift",
+        evdev::KeyCode::KEY_CAPSLOCK => "capslock",
+        evdev::KeyCode::KEY_F1 => "f1",
+        evdev::KeyCode::KEY_F2 => "f2",
+        evdev::KeyCode::KEY_F3 => "f3",
+        evdev::KeyCode::KEY_F4 => "f4",
+        evdev::KeyCode::KEY_F5 => "f5",
+        evdev::KeyCode::KEY_F6 => "f6",
+        evdev::KeyCode::KEY_F7 => "f7",
+        evdev::KeyCode::KEY_F8 => "f8",
+        evdev::KeyCode::KEY_F9 => "f9",
+        evdev::KeyCode::KEY_F10 => "f10",
+        evdev::KeyCode::KEY_F11 => "f11",
+        evdev::KeyCode::KEY_F12 => "f12",
+        evdev::KeyCode::KEY_F13 => "f13",
+        evdev::KeyCode::KEY_F14 => "f14",
+        evdev::KeyCode::KEY_F15 => "f15",
+        evdev::KeyCode::KEY_F16 => "f16",
+        evdev::KeyCode::KEY_F17 => "f17",
+        evdev::KeyCode::KEY_F18 => "f18",
+        evdev::KeyCode::KEY_F19 => "f19",
+        evdev::KeyCode::KEY_F20 => "f20",
+        _ => return None,
+    })
+}
+
 fn parse_key_name(name: &str) -> Result<evdev::KeyCode> {
     let n = name.to_ascii_lowercase();
     let n = n.strip_prefix("key_").unwrap_or(&n);
@@ -680,4 +732,180 @@ async fn send_command_quiet(cmd: &str) -> Result<()> {
     stream.write_all(format!("{cmd}\n").as_bytes()).await?;
     stream.shutdown().await.ok();
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// set-key: interactively pick the PTT key and persist it as a systemd
+// override. Handles two common friction points:
+//   1. "what IS my right Cmd called to evdev?" — we report the canonical
+//      name and the numeric code.
+//   2. "does this key actually work end-to-end?" — we confirm both press
+//      AND release events landed, so the user knows hold-to-talk will work.
+// ---------------------------------------------------------------------------
+
+async fn run_set_key(dry_run: bool, timeout_secs: u64) -> Result<()> {
+    // Stop the running watcher so it doesn't intercept the test key-press.
+    // Remember if it was running so we can restore state on exit.
+    let watcher_was_active = watcher_is_active();
+    if watcher_was_active {
+        let _ = run_systemctl_user(&["stop", "utter-watcher.service"]);
+    }
+
+    let result = pick_key_and_maybe_save(dry_run, timeout_secs).await;
+
+    // Always restart the watcher if it was running before — whether we
+    // saved a new key or the user cancelled. Saving wrote the override
+    // before this runs, so restart picks up the new ExecStart automatically.
+    if watcher_was_active {
+        let _ = run_systemctl_user(&["daemon-reload"]);
+        let _ = run_systemctl_user(&["start", "utter-watcher.service"]);
+    }
+
+    result
+}
+
+async fn pick_key_and_maybe_save(dry_run: bool, timeout_secs: u64) -> Result<()> {
+    // Enumerate anything that looks like a keyboard. KEY_A is present on
+    // every real keyboard and absent on mice/touchpads/joysticks, so it's
+    // a good discriminator that doesn't lock us to one modifier class.
+    let devices: Vec<(std::path::PathBuf, evdev::Device)> = evdev::enumerate()
+        .filter(|(_, d)| {
+            d.supported_keys()
+                .map_or(false, |k| k.contains(evdev::KeyCode::KEY_A))
+        })
+        .collect();
+
+    if devices.is_empty() {
+        return Err(anyhow!(
+            "no readable keyboard devices found.\n\
+             \n\
+             Package install: the udev uaccess rule grants read access on \
+             login — if you just installed, log out + back in, or run:\n\
+               sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=input\n\
+             \n\
+             From-source install: check you're in the `input` group:\n\
+               id | grep input\n\
+             If not: sudo usermod -aG input \"$USER\" and log out + back in."
+        ));
+    }
+
+    eprintln!(
+        "Listening on {} keyboard device(s).\n\
+         Press and hold the key you want to use for push-to-talk, then release it.\n\
+         (Ctrl+C to cancel; timeout in {}s.)",
+        devices.len(),
+        timeout_secs
+    );
+
+    // One task per device; first press+release pair wins.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<evdev::KeyCode>(1);
+    let mut handles = Vec::new();
+    for (_path, device) in devices {
+        let tx = tx.clone();
+        handles.push(tokio::spawn(async move {
+            let _ = watch_first_press_release(device, tx).await;
+        }));
+    }
+    drop(tx);
+
+    let recv_result =
+        tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), rx.recv()).await;
+    for h in handles {
+        h.abort();
+    }
+
+    let code = recv_result
+        .map_err(|_| anyhow!("timed out — no key press + release captured"))?
+        .ok_or_else(|| anyhow!("no key detected"))?;
+
+    let name = canonical_name_for(code).ok_or_else(|| {
+        anyhow!(
+            "detected key with code {} but utter doesn't have a short name for it. \
+             Modifier keys (ctrl/alt/meta/shift), capslock, and F1-F20 are the \
+             supported set — pick one of those for push-to-talk.",
+            code.code()
+        )
+    })?;
+
+    println!("Detected: {name} (code {}). Press + release both captured — hold-to-talk will work.", code.code());
+
+    if dry_run {
+        eprintln!("(--dry-run: not saving.)");
+        return Ok(());
+    }
+
+    write_watcher_override(name)?;
+    println!("Saved override. Watcher will use `{name}` after this command finishes.");
+    Ok(())
+}
+
+async fn watch_first_press_release(
+    device: evdev::Device,
+    tx: tokio::sync::mpsc::Sender<evdev::KeyCode>,
+) -> Result<()> {
+    let mut stream = device.into_event_stream()?;
+    let mut pressed: Option<evdev::KeyCode> = None;
+    loop {
+        let ev = stream.next_event().await?;
+        if ev.event_type() != evdev::EventType::KEY {
+            continue;
+        }
+        let code = evdev::KeyCode::new(ev.code());
+        match ev.value() {
+            1 => {
+                // First key-down wins; ignore other keys pressed during the hold.
+                if pressed.is_none() {
+                    pressed = Some(code);
+                }
+            }
+            0 => {
+                // Release of the held key completes the test.
+                if pressed == Some(code) {
+                    let _ = tx.send(code).await;
+                    return Ok(());
+                }
+            }
+            _ => {} // 2 = autorepeat, ignore
+        }
+    }
+}
+
+fn write_watcher_override(key_name: &str) -> Result<()> {
+    let override_dir = dirs::config_dir()
+        .ok_or_else(|| anyhow!("no XDG config dir"))?
+        .join("systemd/user/utter-watcher.service.d");
+    std::fs::create_dir_all(&override_dir)?;
+    let override_path = override_dir.join("override.conf");
+
+    // Resolve the binary path via /proc/self/exe — works whether utter is
+    // installed at /usr/bin/utter (package) or ~/.cargo/bin/utter (source).
+    let exe = std::env::current_exe()
+        .context("reading /proc/self/exe to resolve utter's binary path")?;
+
+    let content = format!(
+        "# Written by `utter set-key` — edit at your own risk, or re-run the command.\n\
+         [Service]\n\
+         ExecStart=\n\
+         ExecStart={} watch --key {}\n",
+        exe.display(),
+        key_name,
+    );
+    std::fs::write(&override_path, content)
+        .with_context(|| format!("writing {}", override_path.display()))?;
+    Ok(())
+}
+
+fn watcher_is_active() -> bool {
+    std::process::Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", "utter-watcher.service"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn run_systemctl_user(args: &[&str]) -> std::io::Result<std::process::ExitStatus> {
+    std::process::Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .status()
 }

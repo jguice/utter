@@ -97,8 +97,9 @@ If any of those fail, jump to [Troubleshooting](#troubleshooting).
 
 Hold the push-to-talk key, speak, release. The transcription pastes into whichever field has focus.
 
-- **Default key:** Right Cmd on Apple keyboards, Right Super on others (`rightmeta` in kernel-event terms).
-- **Output:** text is copied to both the clipboard and the primary selection, then auto-pasted via Shift+Insert.
+- **Default key:** Right Cmd on Apple keyboards, Right Super on others (`rightmeta` in kernel-event terms). To change it, run `utter set-key` and press the key you'd rather use.
+- **Visual cue:** while you hold the key, your desktop's standard **microphone-in-use icon** lights up in the tray / status bar. That's the intentional "utter is listening" indicator — no custom overlay.
+- **Output:** text is copied to both the clipboard and the primary selection, then auto-pasted via Shift+Insert into the focused window.
 
 ## Configuration
 
@@ -120,7 +121,25 @@ To change any of the env vars below, run `systemctl --user edit utter-daemon` an
 
 ### Change the push-to-talk key
 
-Override the service unit (this works for both packaged and from-source installs and survives upgrades):
+Easiest: let utter detect the key for you.
+
+```bash
+utter set-key
+```
+
+Press and hold the key you want, then release. utter reports what it detected (e.g. `Detected: rightmeta (code 126)`), confirms the press **and** release both fired cleanly (so you know hold-to-talk will actually work on that key), and writes the override to `~/.config/systemd/user/utter-watcher.service.d/override.conf`. Pass `--dry-run` to just detect without saving.
+
+That covers both "what evdev name does this key have?" and "can utter actually read this key's events on my system?" in one step — useful if you remapped a key in your keyboard firmware (QMK, VIA, Karabiner-on-macOS-sibling-tool) or via a desktop utility, and you want to confirm it shows up as something usable.
+
+### Recording indicator
+
+While you're holding the key, your desktop's standard **microphone-in-use icon** (the small mic that appears in KDE's system tray, GNOME's top bar, etc.) is the intentional visual cue that utter is listening. When you release the key, recording stops and the icon disappears. utter doesn't ship a custom overlay widget on purpose — the system indicator is already there, already correct, and doesn't draw anything ugly over your screen.
+
+For a noisier feedback mode (a toast on start / errors), set `UTTER_NOTIFY=1` (see the table above).
+
+### Manual override (if you'd rather)
+
+`utter set-key` is a wrapper around editing the systemd unit. To do it by hand:
 
 ```bash
 systemctl --user edit utter-watcher
@@ -134,22 +153,9 @@ ExecStart=
 ExecStart=/usr/bin/utter watch --key capslock
 ```
 
-Replace `capslock` with any of:
+Valid names: `leftmeta rightmeta leftctrl rightctrl leftalt rightalt leftshift rightshift capslock f1..f20`, plus Apple-friendly aliases `rightcmd leftcmd rightoption leftoption`.
 
-```
-leftmeta rightmeta leftctrl rightctrl leftalt rightalt leftshift rightshift
-capslock f1..f20
-```
-
-Apple-friendly aliases also work: `rightcmd`, `leftcmd`, `rightoption`, `leftoption`.
-
-Save and exit, then restart the watcher:
-
-```bash
-systemctl --user restart utter-watcher
-```
-
-(For from-source installs, the binary path in the `ExecStart` is `%h/.cargo/bin/utter` instead of `/usr/bin/utter`.)
+Save, then `systemctl --user restart utter-watcher`. For from-source installs, the `ExecStart` binary path is `%h/.cargo/bin/utter` instead of `/usr/bin/utter`.
 
 ## Architecture
 
