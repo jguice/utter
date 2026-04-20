@@ -414,51 +414,6 @@ fn cleanup_transcription(text: &str) -> String {
     joined.trim().to_string()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::cleanup_transcription;
-
-    #[test]
-    fn drops_fillers() {
-        assert_eq!(cleanup_transcription("I uh went to the store"), "I went to the store");
-        assert_eq!(cleanup_transcription("uh um er ah"), "");
-        assert_eq!(cleanup_transcription("Hello, um, world"), "Hello, world");
-    }
-
-    #[test]
-    fn collapses_partial_stutter_before_full_word() {
-        assert_eq!(cleanup_transcription("wh wh wh what"), "what");
-        assert_eq!(
-            cleanup_transcription("I want to go to the wh wh wh whatever store"),
-            "I want to go to the whatever store"
-        );
-        assert_eq!(cleanup_transcription("fri fri fri fri frictionless"), "frictionless");
-    }
-
-    #[test]
-    fn collapses_triple_plus_word_repetition() {
-        assert_eq!(cleanup_transcription("I I I think so"), "I think so");
-        assert_eq!(cleanup_transcription("no no no no"), "no");
-    }
-
-    #[test]
-    fn leaves_light_repetition_alone() {
-        assert_eq!(cleanup_transcription("very very good"), "very very good");
-        assert_eq!(cleanup_transcription("the the cat"), "the the cat");
-    }
-
-    #[test]
-    fn preserves_contractions_and_case() {
-        assert_eq!(cleanup_transcription("I don't know"), "I don't know");
-        assert_eq!(cleanup_transcription("Hello, World."), "Hello, World.");
-    }
-
-    #[test]
-    fn fixes_punctuation_spacing_around_dropped_fillers() {
-        assert_eq!(cleanup_transcription("okay , uh , so"), "okay, so");
-    }
-}
-
 async fn emit_text(text: &str) {
     // Always put the text on the clipboard — a safety net (user can paste
     // manually if auto-paste fails) and the source we read for the paste
@@ -715,7 +670,7 @@ async fn run_watcher(key_name: &str) -> Result<()> {
     let matching: Vec<(std::path::PathBuf, evdev::Device)> = evdev::enumerate()
         .filter(|(_, d)| {
             d.supported_keys()
-                .map_or(false, |k| k.contains(target))
+                .is_some_and(|k| k.contains(target))
         })
         .collect();
 
@@ -734,7 +689,6 @@ async fn run_watcher(key_name: &str) -> Result<()> {
 
     let mut handles = Vec::new();
     for (path, device) in matching {
-        let target = target;
         handles.push(tokio::spawn(async move {
             if let Err(e) = watch_device(device, target).await {
                 log::warn!("watch {}: {e:#}", path.display());
@@ -861,7 +815,7 @@ async fn pick_key_and_maybe_save(dry_run: bool, timeout_secs: u64) -> Result<()>
     let devices: Vec<(std::path::PathBuf, evdev::Device)> = evdev::enumerate()
         .filter(|(_, d)| {
             d.supported_keys()
-                .map_or(false, |k| k.contains(evdev::KeyCode::KEY_A))
+                .is_some_and(|k| k.contains(evdev::KeyCode::KEY_A))
         })
         .collect();
 
@@ -943,36 +897,36 @@ async fn watch_first_press_release(
             continue;
         }
         let code = evdev::KeyCode::new(ev.code());
+        // First key-down wins; release of the held key completes the test.
+        // value 2 = autorepeat, ignored.
         match ev.value() {
-            1 => {
-                // First key-down wins; ignore other keys pressed during the hold.
-                if pressed.is_none() {
-                    pressed = Some(code);
-                }
+            1 if pressed.is_none() => pressed = Some(code),
+            0 if pressed == Some(code) => {
+                let _ = tx.send(code).await;
+                return Ok(());
             }
-            0 => {
-                // Release of the held key completes the test.
-                if pressed == Some(code) {
-                    let _ = tx.send(code).await;
-                    return Ok(());
-                }
-            }
-            _ => {} // 2 = autorepeat, ignore
+            _ => {}
         }
     }
 }
 
 fn write_watcher_override(key_name: &str) -> Result<()> {
-    let override_dir = dirs::config_dir()
-        .ok_or_else(|| anyhow!("no XDG config dir"))?
-        .join("systemd/user/utter-watcher.service.d");
-    std::fs::create_dir_all(&override_dir)?;
-    let override_path = override_dir.join("override.conf");
-
+    let config_dir = dirs::config_dir().ok_or_else(|| anyhow!("no XDG config dir"))?;
     // Resolve the binary path via /proc/self/exe — works whether utter is
     // installed at /usr/bin/utter (package) or ~/.cargo/bin/utter (source).
     let exe = std::env::current_exe()
         .context("reading /proc/self/exe to resolve utter's binary path")?;
+    write_watcher_override_at(&config_dir, &exe, key_name)
+}
+
+fn write_watcher_override_at(
+    config_dir: &std::path::Path,
+    exe: &std::path::Path,
+    key_name: &str,
+) -> Result<()> {
+    let override_dir = config_dir.join("systemd/user/utter-watcher.service.d");
+    std::fs::create_dir_all(&override_dir)?;
+    let override_path = override_dir.join("override.conf");
 
     let content = format!(
         "# Written by `utter set-key` — edit at your own risk, or re-run the command.\n\
@@ -1000,4 +954,203 @@ fn run_systemctl_user(args: &[&str]) -> std::io::Result<std::process::ExitStatus
         .arg("--user")
         .args(args)
         .status()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        canonical_name_for, cleanup_transcription, parse_key_name, write_watcher_override_at,
+    };
+    use std::path::PathBuf;
+
+    #[test]
+    fn drops_fillers() {
+        assert_eq!(cleanup_transcription("I uh went to the store"), "I went to the store");
+        assert_eq!(cleanup_transcription("uh um er ah"), "");
+        assert_eq!(cleanup_transcription("Hello, um, world"), "Hello, world");
+    }
+
+    #[test]
+    fn collapses_partial_stutter_before_full_word() {
+        assert_eq!(cleanup_transcription("wh wh wh what"), "what");
+        assert_eq!(
+            cleanup_transcription("I want to go to the wh wh wh whatever store"),
+            "I want to go to the whatever store"
+        );
+        assert_eq!(cleanup_transcription("fri fri fri fri frictionless"), "frictionless");
+    }
+
+    #[test]
+    fn collapses_triple_plus_word_repetition() {
+        assert_eq!(cleanup_transcription("I I I think so"), "I think so");
+        assert_eq!(cleanup_transcription("no no no no"), "no");
+    }
+
+    #[test]
+    fn leaves_light_repetition_alone() {
+        assert_eq!(cleanup_transcription("very very good"), "very very good");
+        assert_eq!(cleanup_transcription("the the cat"), "the the cat");
+    }
+
+    #[test]
+    fn preserves_contractions_and_case() {
+        assert_eq!(cleanup_transcription("I don't know"), "I don't know");
+        assert_eq!(cleanup_transcription("Hello, World."), "Hello, World.");
+    }
+
+    #[test]
+    fn fixes_punctuation_spacing_around_dropped_fillers() {
+        assert_eq!(cleanup_transcription("okay , uh , so"), "okay, so");
+    }
+
+    #[test]
+    fn parse_key_name_resolves_named_aliases() {
+        assert_eq!(parse_key_name("rightmeta").unwrap(), evdev::KeyCode::KEY_RIGHTMETA);
+        assert_eq!(parse_key_name("leftmeta").unwrap(), evdev::KeyCode::KEY_LEFTMETA);
+        assert_eq!(parse_key_name("capslock").unwrap(), evdev::KeyCode::KEY_CAPSLOCK);
+        assert_eq!(parse_key_name("scrolllock").unwrap(), evdev::KeyCode::KEY_SCROLLLOCK);
+        assert_eq!(parse_key_name("f13").unwrap(), evdev::KeyCode::KEY_F13);
+        assert_eq!(parse_key_name("f24").unwrap(), evdev::KeyCode::KEY_F24);
+        assert_eq!(parse_key_name("printscreen").unwrap(), evdev::KeyCode::KEY_SYSRQ);
+        assert_eq!(parse_key_name("menu").unwrap(), evdev::KeyCode::KEY_COMPOSE);
+    }
+
+    #[test]
+    fn parse_key_name_accepts_apple_and_synonym_aliases() {
+        assert_eq!(parse_key_name("rightcmd").unwrap(), evdev::KeyCode::KEY_RIGHTMETA);
+        assert_eq!(parse_key_name("rightcommand").unwrap(), evdev::KeyCode::KEY_RIGHTMETA);
+        assert_eq!(parse_key_name("rightsuper").unwrap(), evdev::KeyCode::KEY_RIGHTMETA);
+        assert_eq!(parse_key_name("leftoption").unwrap(), evdev::KeyCode::KEY_LEFTALT);
+        assert_eq!(parse_key_name("rightcontrol").unwrap(), evdev::KeyCode::KEY_RIGHTCTRL);
+        assert_eq!(parse_key_name("caps").unwrap(), evdev::KeyCode::KEY_CAPSLOCK);
+        assert_eq!(parse_key_name("sysrq").unwrap(), evdev::KeyCode::KEY_SYSRQ);
+        assert_eq!(parse_key_name("pgup").unwrap(), evdev::KeyCode::KEY_PAGEUP);
+        assert_eq!(parse_key_name("page_down").unwrap(), evdev::KeyCode::KEY_PAGEDOWN);
+    }
+
+    #[test]
+    fn parse_key_name_is_case_insensitive() {
+        assert_eq!(parse_key_name("RIGHTMETA").unwrap(), evdev::KeyCode::KEY_RIGHTMETA);
+        assert_eq!(parse_key_name("RightMeta").unwrap(), evdev::KeyCode::KEY_RIGHTMETA);
+        assert_eq!(parse_key_name("F13").unwrap(), evdev::KeyCode::KEY_F13);
+    }
+
+    #[test]
+    fn parse_key_name_strips_key_prefix() {
+        assert_eq!(parse_key_name("KEY_RIGHTMETA").unwrap(), evdev::KeyCode::KEY_RIGHTMETA);
+        assert_eq!(parse_key_name("key_capslock").unwrap(), evdev::KeyCode::KEY_CAPSLOCK);
+        assert_eq!(parse_key_name("KEY_F24").unwrap(), evdev::KeyCode::KEY_F24);
+    }
+
+    #[test]
+    fn parse_key_name_numeric_fallback() {
+        // 125 = KEY_LEFTMETA in linux/input-event-codes.h
+        assert_eq!(parse_key_name("125").unwrap().code(), 125);
+        // 194 = KEY_F24
+        assert_eq!(parse_key_name("194").unwrap(), evdev::KeyCode::KEY_F24);
+        // Arbitrary code with no short name — still accepted.
+        assert_eq!(parse_key_name("240").unwrap().code(), 240);
+    }
+
+    #[test]
+    fn parse_key_name_rejects_unknown_input() {
+        assert!(parse_key_name("").is_err());
+        assert!(parse_key_name("not_a_real_key").is_err());
+        assert!(parse_key_name("f99").is_err());
+        // Out-of-range for u16 falls through to the error path.
+        assert!(parse_key_name("99999999").is_err());
+    }
+
+    #[test]
+    fn canonical_name_roundtrips_through_parse_key_name() {
+        // Every code with a canonical name should parse back to the same code.
+        let codes = [
+            evdev::KeyCode::KEY_RIGHTMETA,
+            evdev::KeyCode::KEY_LEFTMETA,
+            evdev::KeyCode::KEY_RIGHTCTRL,
+            evdev::KeyCode::KEY_LEFTCTRL,
+            evdev::KeyCode::KEY_RIGHTALT,
+            evdev::KeyCode::KEY_LEFTALT,
+            evdev::KeyCode::KEY_RIGHTSHIFT,
+            evdev::KeyCode::KEY_LEFTSHIFT,
+            evdev::KeyCode::KEY_CAPSLOCK,
+            evdev::KeyCode::KEY_SCROLLLOCK,
+            evdev::KeyCode::KEY_NUMLOCK,
+            evdev::KeyCode::KEY_PAUSE,
+            evdev::KeyCode::KEY_SYSRQ,
+            evdev::KeyCode::KEY_INSERT,
+            evdev::KeyCode::KEY_COMPOSE,
+            evdev::KeyCode::KEY_HOME,
+            evdev::KeyCode::KEY_END,
+            evdev::KeyCode::KEY_PAGEUP,
+            evdev::KeyCode::KEY_PAGEDOWN,
+            evdev::KeyCode::KEY_F1,
+            evdev::KeyCode::KEY_F12,
+            evdev::KeyCode::KEY_F20,
+            evdev::KeyCode::KEY_F24,
+        ];
+        for code in codes {
+            let name = canonical_name_for(code)
+                .unwrap_or_else(|| panic!("no canonical name for {code:?}"));
+            let parsed = parse_key_name(name)
+                .unwrap_or_else(|e| panic!("roundtrip failed for {name}: {e}"));
+            assert_eq!(parsed, code, "roundtrip mismatch for {name}");
+        }
+    }
+
+    #[test]
+    fn canonical_name_absent_for_plain_letters() {
+        // Letter keys aren't plausible PTT picks; we deliberately don't
+        // assign canonical names and the caller falls back to the numeric
+        // code instead.
+        assert!(canonical_name_for(evdev::KeyCode::KEY_A).is_none());
+        assert!(canonical_name_for(evdev::KeyCode::KEY_SPACE).is_none());
+    }
+
+    #[test]
+    fn write_watcher_override_writes_expected_contents() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = PathBuf::from("/usr/bin/utter");
+        write_watcher_override_at(tmp.path(), &exe, "rightmeta").unwrap();
+
+        let written = std::fs::read_to_string(
+            tmp.path().join("systemd/user/utter-watcher.service.d/override.conf"),
+        )
+        .unwrap();
+        // Empty ExecStart= before our override is required by systemd to
+        // reset the inherited ExecStart from the package unit — otherwise
+        // systemd refuses the override.
+        assert!(written.contains("\nExecStart=\nExecStart=/usr/bin/utter watch --key rightmeta\n"));
+        assert!(written.starts_with("# Written by `utter set-key`"));
+    }
+
+    #[test]
+    fn write_watcher_override_accepts_numeric_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = PathBuf::from("/home/alice/.cargo/bin/utter");
+        write_watcher_override_at(tmp.path(), &exe, "194").unwrap();
+
+        let written = std::fs::read_to_string(
+            tmp.path().join("systemd/user/utter-watcher.service.d/override.conf"),
+        )
+        .unwrap();
+        assert!(written.contains("ExecStart=/home/alice/.cargo/bin/utter watch --key 194\n"));
+    }
+
+    #[test]
+    fn write_watcher_override_creates_parent_dirs_and_overwrites() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = PathBuf::from("/usr/bin/utter");
+
+        write_watcher_override_at(tmp.path(), &exe, "capslock").unwrap();
+        // Second call must overwrite cleanly (no append, no error).
+        write_watcher_override_at(tmp.path(), &exe, "f13").unwrap();
+
+        let written = std::fs::read_to_string(
+            tmp.path().join("systemd/user/utter-watcher.service.d/override.conf"),
+        )
+        .unwrap();
+        assert!(written.contains("watch --key f13\n"));
+        assert!(!written.contains("watch --key capslock"));
+    }
 }
