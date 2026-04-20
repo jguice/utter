@@ -93,11 +93,6 @@ about discoverability and auto-updates:
   units without `Environment=UTTER_*` lines in the same release — new
   installs start clean, existing installs keep working via the
   override ordering.
-- **Opt-in clipboard write.** The default paste path only writes the
-  primary selection, leaving the regular clipboard untouched. Users
-  with clipboard managers may want dictations to land in their
-  clipboard history — expose this as a config-file toggle once the
-  config file lands.
 - **Re-introduce paste-method selection IF a real app breaks
   Shift+Insert.** The current default (Shift+Insert, primary
   selection) covers every terminal + GTK/Qt input we've tested. The

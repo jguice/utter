@@ -113,6 +113,7 @@ To change any of the env vars below, run `systemctl --user edit utter-daemon` an
 | Env var                  | Values                                         | Default          | Purpose                                                                 |
 |--------------------------|------------------------------------------------|------------------|-------------------------------------------------------------------------|
 | `UTTER_AUTOTYPE`      | `0` / `1`                                      | `1`              | When 0, writes the transcription to the primary selection but doesn't synthesize a paste keystroke — middle-click or Shift+Insert manually. |
+| `UTTER_CLIPBOARD`     | `0` / `1`                                      | `0`              | When 1, also writes the transcription to the regular clipboard (so it shows up in clipboard-manager history). Default leaves the regular clipboard untouched. |
 | `UTTER_CLEANUP`       | `0` / `1`                                      | `1`              | Drop fillers (uh/um/er/ah/erm/hmm), collapse stutters (`wh wh what`→`what`, `I I I think`→`I think`). Set 0 for raw Parakeet output. |
 | `UTTER_NOTIFY`        | `0` / `1`                                      | `0`              | When 1, fires a short `notify-send` toast on recording start / error.   |
 | `YDOTOOL_SOCKET`         | path                                           | `/tmp/.ydotool_socket` | Socket path for the ydotool daemon (only change if you relocated it). |

@@ -415,12 +415,14 @@ fn cleanup_transcription(text: &str) -> String {
 }
 
 async fn emit_text(text: &str) {
-    // Write to the primary selection only — deliberately leave the
-    // regular clipboard alone so whatever the user last copied (a
-    // password, a URL, a snippet) is preserved. Primary is inherently
-    // ephemeral (mouse-selecting any text overwrites it), so writing
-    // to it is low-impact.
-    if let Err(e) = wl_copy_primary(text).await {
+    // Always write the primary selection — it's what Shift+Insert
+    // reads from below, and mouse-selecting any text overwrites it
+    // anyway, so the "pollution" cost is negligible. The regular
+    // clipboard is deliberately left alone so whatever the user last
+    // copied (a password, a URL, a snippet) is preserved. Users who
+    // want dictations to land in their clipboard history (e.g. they
+    // run a clipboard manager) can opt in with UTTER_CLIPBOARD=1.
+    if let Err(e) = wl_copy(text).await {
         log::warn!("wl-copy failed: {e:#}");
     }
     if std::env::var("UTTER_AUTOTYPE").ok().as_deref() != Some("1") {
@@ -437,18 +439,43 @@ async fn emit_text(text: &str) {
     }
 }
 
-async fn wl_copy_primary(text: &str) -> Result<()> {
-    let mut child = Command::new("wl-copy")
-        .arg("--primary")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .context("spawn wl-copy")?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes()).await?;
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Selection {
+    Primary,
+    Clipboard,
+}
+
+/// Which wl-copy targets to write based on the `UTTER_CLIPBOARD` env var.
+/// Default is primary-only; `UTTER_CLIPBOARD=1` also writes the regular
+/// clipboard for users who want dictations in their clipboard history.
+/// Anything else (`0`, empty, unset, bogus value) is treated as "don't
+/// pollute the clipboard."
+fn selections_to_write(utter_clipboard_env: Option<&str>) -> &'static [Selection] {
+    if utter_clipboard_env == Some("1") {
+        &[Selection::Primary, Selection::Clipboard]
+    } else {
+        &[Selection::Primary]
     }
-    child.wait().await?;
+}
+
+async fn wl_copy(text: &str) -> Result<()> {
+    let env_val = std::env::var("UTTER_CLIPBOARD").ok();
+    for selection in selections_to_write(env_val.as_deref()) {
+        let mut cmd = Command::new("wl-copy");
+        if *selection == Selection::Primary {
+            cmd.arg("--primary");
+        }
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("spawn wl-copy")?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes()).await?;
+        }
+        child.wait().await?;
+    }
     Ok(())
 }
 
@@ -915,7 +942,8 @@ fn run_systemctl_user(args: &[&str]) -> std::io::Result<std::process::ExitStatus
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_name_for, cleanup_transcription, parse_key_name, write_watcher_override_at,
+        canonical_name_for, cleanup_transcription, parse_key_name, selections_to_write,
+        write_watcher_override_at, Selection,
     };
     use std::path::PathBuf;
 
@@ -1091,6 +1119,26 @@ mod tests {
         )
         .unwrap();
         assert!(written.contains("ExecStart=/home/alice/.cargo/bin/utter watch --key 194\n"));
+    }
+
+    #[test]
+    fn selections_default_to_primary_only() {
+        // Unset, empty, "0", and any bogus value should all mean "don't
+        // pollute the regular clipboard."
+        assert_eq!(selections_to_write(None), &[Selection::Primary]);
+        assert_eq!(selections_to_write(Some("")), &[Selection::Primary]);
+        assert_eq!(selections_to_write(Some("0")), &[Selection::Primary]);
+        assert_eq!(selections_to_write(Some("no")), &[Selection::Primary]);
+        assert_eq!(selections_to_write(Some("yes")), &[Selection::Primary]);
+        assert_eq!(selections_to_write(Some("true")), &[Selection::Primary]);
+    }
+
+    #[test]
+    fn selections_write_both_when_utter_clipboard_is_one() {
+        assert_eq!(
+            selections_to_write(Some("1")),
+            &[Selection::Primary, Selection::Clipboard]
+        );
     }
 
     #[test]
