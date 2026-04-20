@@ -21,15 +21,18 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, llvm-tools-preview
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: ci
 
-      - name: cargo test
-        run: cargo test --locked
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: cargo test with coverage
+        run: cargo llvm-cov --locked --summary-only
 
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings

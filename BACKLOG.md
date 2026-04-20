@@ -51,6 +51,18 @@ about discoverability and auto-updates:
 
 ## Reliability
 
+- **Silence the `onnxruntime cpuid_info warning` on every CLI invocation.**
+  On Apple Silicon / Asahi, ONNX Runtime prints `Unknown CPU vendor.
+  cpuinfo_vendor value: 0` to stderr at shared-library load time — i.e.
+  before `main()` runs, so it fires on every `utter --version`,
+  `utter start`, `utter stop`, etc. even though those subcommands don't
+  need the model at all. Cleanest fix: split the binary so only the
+  `daemon` subcommand links `transcribe-rs` / `ort`, and the short-lived
+  subcommands are a thin shim that talks to the daemon over the socket.
+  An intermediate fix: switch `ort` to its `load-dynamic` feature
+  (dlopen on first use) — the warning then only appears when the daemon
+  actually loads the model. Needs a PR against transcribe-rs (or a
+  feature flag) since it pins ort's features itself.
 - **Hotplug support in the watcher.** Currently enumerates
   `/dev/input/event*` once at startup. If you plug in a new keyboard
   later, the watcher won't pick it up without a restart. Subscribe to
