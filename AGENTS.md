@@ -18,6 +18,6 @@
 
 - **After editing any service, `systemctl --user daemon-reload` and then `restart` the affected unit.** Neither happens automatically.
 
-- **Don't guess env var names or values.** They're listed in README's Configuration table. Valid values for `UTTER_PASTE_METHOD` are exactly `shift-insert`, `ctrl-v`, `ctrl-shift-v`, or `type` — any other string makes the daemon warn on every paste.
+- **Don't guess env var names or values.** They're listed in README's Configuration table.
 
 - **If a command requires `sudo`, tell the user to run it rather than trying to pipe a password.** Hook-based command execution typically can't forward a TTY for password prompts.

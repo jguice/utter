@@ -84,10 +84,29 @@ about discoverability and auto-updates:
 
 ## Configuration
 
-- **Config file** (`~/.config/utter/config.toml`) to replace
-  the growing list of `UTTER_*` env vars. Watcher key, paste
-  method, notify preferences, model path.
+- **Config file** (`~/.config/utter/config.toml`) to replace the
+  remaining `UTTER_*` env vars (cleanup, notify) plus the watcher key
+  (currently written as a systemd drop-in by `utter set-key`).
+  Migration path: on first run, if `config.toml` doesn't exist, read
+  any `UTTER_*` env vars that *are* set and persist them; env vars
+  still override the file (standard UNIX precedence). Ship the service
+  units without `Environment=UTTER_*` lines in the same release — new
+  installs start clean, existing installs keep working via the
+  override ordering.
+- **Opt-in clipboard write.** The default paste path only writes the
+  primary selection, leaving the regular clipboard untouched. Users
+  with clipboard managers may want dictations to land in their
+  clipboard history — expose this as a config-file toggle once the
+  config file lands.
+- **Re-introduce paste-method selection IF a real app breaks
+  Shift+Insert.** The current default (Shift+Insert, primary
+  selection) covers every terminal + GTK/Qt input we've tested. The
+  `ctrl-v` / `ctrl-shift-v` branches were removed because they were
+  speculative — no app in our test set needed them. If a user reports
+  a specific app where Shift+Insert fails, add a per-app or
+  config-file override **with that app documented as the motivation**.
 - **Per-app paste method.** Different apps want different keystrokes
   (Claude Code wants Shift+Insert, Konsole wants Ctrl+Shift+V, most
   GUIs want Ctrl+V). Look up the focused window class via KWin
-  D-Bus / wlroots toplevel-management and dispatch accordingly.
+  D-Bus / wlroots toplevel-management and dispatch accordingly. Only
+  worth building if the previous item turns up real-world breakage.

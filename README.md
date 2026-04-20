@@ -99,7 +99,7 @@ Hold the push-to-talk key, speak, release. The transcription pastes into whichev
 
 - **Default key:** Right Cmd on Apple keyboards, Right Super on others (`rightmeta` in kernel-event terms). To change it, run `utter set-key` and press the key you'd rather use.
 - **Visual cue:** while you hold the key, your desktop's standard **microphone-in-use icon** lights up in the tray / status bar. That's the intentional "utter is listening" indicator — no custom overlay.
-- **Output:** text is copied to both the clipboard and the primary selection, then auto-pasted via Shift+Insert into the focused window.
+- **Output:** text is written to the primary selection and auto-pasted via Shift+Insert into the focused window. The regular clipboard is deliberately left untouched so whatever you last copied is preserved.
 
 ## Configuration
 
@@ -112,8 +112,7 @@ To change any of the env vars below, run `systemctl --user edit utter-daemon` an
 
 | Env var                  | Values                                         | Default          | Purpose                                                                 |
 |--------------------------|------------------------------------------------|------------------|-------------------------------------------------------------------------|
-| `UTTER_AUTOTYPE`      | `0` / `1`                                      | `1`              | When 0, only copies to clipboard (Ctrl+V to paste manually).            |
-| `UTTER_PASTE_METHOD`  | `shift-insert`, `ctrl-v`, `ctrl-shift-v`, `type` | `shift-insert` | Which keystroke to send after copying. `type` = character-at-a-time.    |
+| `UTTER_AUTOTYPE`      | `0` / `1`                                      | `1`              | When 0, writes the transcription to the primary selection but doesn't synthesize a paste keystroke — middle-click or Shift+Insert manually. |
 | `UTTER_CLEANUP`       | `0` / `1`                                      | `1`              | Drop fillers (uh/um/er/ah/erm/hmm), collapse stutters (`wh wh what`→`what`, `I I I think`→`I think`). Set 0 for raw Parakeet output. |
 | `UTTER_NOTIFY`        | `0` / `1`                                      | `0`              | When 1, fires a short `notify-send` toast on recording start / error.   |
 | `YDOTOOL_SOCKET`         | path                                           | `/tmp/.ydotool_socket` | Socket path for the ydotool daemon (only change if you relocated it). |
@@ -180,14 +179,14 @@ evdev ──► key event (press/release)
                                └─────────────┬─────────────┘
                                              │
                                              ▼
-                                     wl-copy (clipboard + primary)
-                                     ydotool key (paste keystroke)
+                                     wl-copy --primary (primary selection)
+                                     ydotool key (Shift+Insert)
                                      ─► focused window
 ```
 
 Two systemd user services:
 
-- **`utter-daemon`** — loads the model once (~630 ms on M2 Max), opens a Unix socket at `$XDG_RUNTIME_DIR/utter.sock`, accepts `start` / `stop` / `toggle` / `quit`. `start` forks `arecord` writing to `/tmp/utter-*.wav`. `stop` SIGINTs arecord, hands the WAV to Parakeet, and runs the output through clipboard + paste keystroke.
+- **`utter-daemon`** — loads the model once (~630 ms on M2 Max), opens a Unix socket at `$XDG_RUNTIME_DIR/utter.sock`, accepts `start` / `stop` / `toggle` / `quit`. `start` forks `arecord` writing to `/tmp/utter-*.wav`. `stop` SIGINTs arecord, hands the WAV to Parakeet, writes the output to the primary selection, and synthesizes Shift+Insert via ydotool.
 - **`utter-watcher`** — async evdev loop. Enumerates keyboards at startup, watches for the configured key on each, sends `start` on press and `stop` on release to the daemon. Ignores autorepeat (value=2).
 
 Plus one system service for `ydotoold` (the only privileged component — needs `/dev/uinput`).
@@ -210,11 +209,10 @@ ls -l /dev/input/event* | head
 **"no audio captured" error.**
 Your mic isn't producing samples. Test with `arecord -d 3 /tmp/x.wav && aplay /tmp/x.wav`. If that fails, check `wpctl status` (default source is right and volume is non-zero) and `journalctl --user | grep spa.alsa`.
 
-**Auto-paste is slow / characters appear one-by-one.**
-Your configured paste method failed (the focused app didn't accept it) and fell back to `ydotool type`. Try a different paste method via `UTTER_PASTE_METHOD` — some apps want `ctrl-v`, terminals want `ctrl-shift-v`, Claude Code and most others want `shift-insert`.
+**Paste goes to the wrong place / nothing pastes.**
+Shift+Insert pastes from the primary selection — which any mouse text-selection overwrites. If you highlighted something between releasing the key and the paste firing, the paste may use *that* text instead of your transcription. Release the PTT key in the window you want the text to land in and don't touch the mouse until it pastes.
 
-**Text pastes something else entirely (stale text).**
-Usually means only one of the two selections (clipboard / primary) is being written. The installed version writes both; if you're on an older build, pull and reinstall.
+If the cursor blinks but no text appears, check `journalctl --user -u utter-daemon -n 50` for `paste failed` or `wl-copy failed` warnings — those indicate ydotool or the compositor rejected something.
 
 ## Uninstall
 

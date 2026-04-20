@@ -415,90 +415,40 @@ fn cleanup_transcription(text: &str) -> String {
 }
 
 async fn emit_text(text: &str) {
-    // Always put the text on the clipboard — a safety net (user can paste
-    // manually if auto-paste fails) and the source we read for the paste
-    // keystroke.
-    if let Err(e) = wl_copy(text).await {
+    // Write to the primary selection only — deliberately leave the
+    // regular clipboard alone so whatever the user last copied (a
+    // password, a URL, a snippet) is preserved. Primary is inherently
+    // ephemeral (mouse-selecting any text overwrites it), so writing
+    // to it is low-impact.
+    if let Err(e) = wl_copy_primary(text).await {
         log::warn!("wl-copy failed: {e:#}");
     }
     if std::env::var("UTTER_AUTOTYPE").ok().as_deref() != Some("1") {
         return;
     }
-    // UTTER_PASTE_METHOD picks the keystroke that triggers paste in the
-    // focused app. Default is shift-insert because it's the most universal
-    // Linux paste binding (terminals, Qt/GTK apps all accept it) and it
-    // avoids Ctrl+V clashes (e.g. Claude Code binds Ctrl+V to image paste).
-    let method = std::env::var("UTTER_PASTE_METHOD")
-        .unwrap_or_else(|_| "shift-insert".to_string());
-    let paste_result = match method.as_str() {
-        // Kernel keycodes from /usr/include/linux/input-event-codes.h.
-        // Sequence is press-press-release-release.
-        // LEFTSHIFT=42, INSERT=110
-        "shift-insert" | "shift+insert" => {
-            ydotool_keys(&["42:1", "110:1", "110:0", "42:0"]).await
-        }
-        // LEFTCTRL=29, V=47
-        "ctrl-v" | "ctrl+v" => ydotool_keys(&["29:1", "47:1", "47:0", "29:0"]).await,
-        // LEFTCTRL=29, LEFTSHIFT=42, V=47 — Konsole's default paste combo.
-        "ctrl-shift-v" | "ctrl+shift+v" => {
-            ydotool_keys(&["29:1", "42:1", "47:1", "47:0", "42:0", "29:0"]).await
-        }
-        // Skip paste entirely, type character-by-character. Slow for long
-        // text but works in apps that don't support clipboard paste.
-        "type" => ydotool_type(text).await,
-        other => Err(anyhow!(
-            "unknown UTTER_PASTE_METHOD '{other}' (expected: shift-insert, ctrl-v, ctrl-shift-v, type)"
-        )),
-    };
-    if let Err(paste_err) = paste_result {
-        log::warn!("paste failed ({method}): {paste_err:#}; falling back to typing");
-        if let Err(type_err) = ydotool_type(text).await {
-            log::warn!("type fallback also failed: {type_err:#}");
-        }
+    // LEFTSHIFT=42, INSERT=110 — kernel keycodes from
+    // /usr/include/linux/input-event-codes.h. Sequence is
+    // press-press-release-release. Shift+Insert pastes from the
+    // primary selection in every terminal and GTK/Qt text input we've
+    // tested. If a real app turns up that ignores it, see
+    // BACKLOG.md → Configuration.
+    if let Err(e) = ydotool_keys(&["42:1", "110:1", "110:0", "42:0"]).await {
+        log::warn!("paste failed: {e:#}");
     }
 }
 
-async fn wl_copy(text: &str) -> Result<()> {
-    // Write to BOTH the regular clipboard and the primary selection. Wayland
-    // (inherited from X11) has two independent paste buffers:
-    //   - clipboard (Ctrl+C / Ctrl+V, Ctrl+Shift+V in terminals)
-    //   - primary selection (Shift+Insert, middle-click) — set implicitly
-    //     by mouse text selection
-    // If we only populate the clipboard, Shift+Insert keeps pasting whatever
-    // the user last mouse-selected (often stale). Writing both keeps every
-    // common paste shortcut in sync with the dictation output.
-    for primary in [false, true] {
-        let mut cmd = Command::new("wl-copy");
-        if primary {
-            cmd.arg("--primary");
-        }
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("spawn wl-copy")?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes()).await?;
-        }
-        child.wait().await?;
+async fn wl_copy_primary(text: &str) -> Result<()> {
+    let mut child = Command::new("wl-copy")
+        .arg("--primary")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("spawn wl-copy")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(text.as_bytes()).await?;
     }
-    Ok(())
-}
-
-async fn ydotool_type(text: &str) -> Result<()> {
-    // --key-delay 0 --key-hold 1 minimizes the inter-key delay; default
-    // is 20ms/20ms = ~40ms per character, which adds up to multi-second
-    // delays for normal-length transcriptions.
-    let output = Command::new("ydotool")
-        .args(["type", "--key-delay", "0", "--key-hold", "1", "--"])
-        .arg(text)
-        .output()
-        .await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("ydotool type: {}", stderr.trim()));
-    }
+    child.wait().await?;
     Ok(())
 }
 
