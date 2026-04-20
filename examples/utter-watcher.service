@@ -1,0 +1,18 @@
+[Unit]
+Description=Utter evdev key watcher (hold-to-talk)
+After=graphical-session.target utter-daemon.service
+Wants=utter-daemon.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+# Change --key to any name parse_key_name() accepts (rightmeta, leftmeta,
+# rightctrl, capslock, f13, ...). The user MUST be in the `input` group
+# for /dev/input/event* to be readable.
+ExecStart=%h/.cargo/bin/utter watch --key rightmeta
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,165 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v0.4.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  NFPM_VERSION: 2.46.3
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+            rust_target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            rust_target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Resolve checkout ref
+        id: resolve_ref
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          EVENT_REF: ${{ github.ref }}
+        run: |
+          if [ -n "$DISPATCH_TAG" ]; then
+            printf 'ref=%s\n' "$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
+          else
+            printf 'ref=%s\n' "$EVENT_REF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve_ref.outputs.ref }}
+
+      - name: Install system build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libssl-dev pkg-config clang cmake g++ curl
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.arch }}
+
+      - name: Build release binary
+        env:
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: cargo build --release --locked --target "$RUST_TARGET"
+
+      - name: Stage binary for nfpm
+        env:
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          mkdir -p target/release
+          cp "target/${RUST_TARGET}/release/utter" target/release/utter
+
+      - name: Install nfpm
+        env:
+          ARCH_DEB: ${{ matrix.arch }}
+        run: |
+          curl -sSfL \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${ARCH_DEB}.deb" \
+            -o /tmp/nfpm.deb
+          sudo dpkg -i /tmp/nfpm.deb
+
+      - name: Build .deb and .rpm
+        working-directory: packaging
+        env:
+          RAW_VERSION: ${{ github.ref_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          UTTER_ARCH: ${{ matrix.arch }}
+        run: |
+          TAG="${DISPATCH_TAG:-$RAW_VERSION}"
+          # Strip leading 'v' so package version is 0.4.0, not v0.4.0.
+          UTTER_VERSION="${TAG#v}"
+          export UTTER_VERSION UTTER_ARCH
+          mkdir -p ../dist
+          nfpm pkg --packager deb --target ../dist/
+          nfpm pkg --packager rpm --target ../dist/
+
+      - name: Build plain binary tarball
+        env:
+          RAW_VERSION: ${{ github.ref_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+          UTTER_ARCH: ${{ matrix.arch }}
+        run: |
+          TAG="${DISPATCH_TAG:-$RAW_VERSION}"
+          VERSION="${TAG#v}"
+          STAGE="utter-${VERSION}-linux-${UTTER_ARCH}"
+          mkdir -p "dist/${STAGE}"
+          cp target/release/utter "dist/${STAGE}/"
+          cp README.md LICENSE NOTICE AGENTS.md CLAUDE.md BACKLOG.md "dist/${STAGE}/"
+          cp -r packaging "dist/${STAGE}/"
+          cp -r scripts "dist/${STAGE}/"
+          tar -C dist -czf "dist/${STAGE}.tar.gz" "${STAGE}"
+          rm -rf "dist/${STAGE}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Resolve release tag
+        id: resolve_tag
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          EVENT_TAG: ${{ github.ref_name }}
+        run: |
+          if [ -n "$DISPATCH_TAG" ]; then
+            printf 'tag=%s\n' "$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
+          else
+            printf 'tag=%s\n' "$EVENT_TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Attach artifacts to GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.resolve_tag.outputs.tag }}
+          files: |
+            dist/utter_*.deb
+            dist/utter-*.rpm
+            dist/utter-*.tar.gz
+          # release-please creates the Release with CHANGELOG-derived notes
+          # before this workflow runs; we only need to attach artifacts.
+          generate_release_notes: false
+          fail_on_unmatched_files: true

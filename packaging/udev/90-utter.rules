@@ -1,0 +1,9 @@
+# Grant the active-seat user read access to keyboard evdev devices so
+# utter-watcher can observe key press/release events without requiring
+# the user to be in the `input` group.
+#
+# The `uaccess` tag instructs systemd-logind to add an ACL granting the
+# currently-active local user read access. When they log out, the ACL
+# goes away. Scope is limited to devices tagged by the input stack as
+# keyboards (ID_INPUT_KEYBOARD=1), not mice/touchpads/joysticks.
+KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"

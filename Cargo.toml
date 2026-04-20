@@ -1,0 +1,23 @@
+[package]
+name = "utter"
+version = "0.1.0"
+edition = "2021"
+description = "Local push-to-talk voice dictation for Linux, powered by NVIDIA Parakeet"
+license = "MIT"
+repository = "https://github.com/jguice/utter"
+
+[dependencies]
+transcribe-rs = { version = "0.3", features = ["onnx"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "signal", "io-util", "sync", "time", "fs"] }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "5"
+env_logger = "0.11"
+log = "0.4"
+nix = { version = "0.29", features = ["signal"] }
+evdev = { version = "0.13", features = ["tokio"] }
+
+[profile.release]
+panic = "abort"
+strip = true
+lto = "thin"

@@ -1,0 +1,91 @@
+name: utter
+version: ${UTTER_VERSION}
+arch: ${UTTER_ARCH}
+platform: linux
+maintainer: Josh Guice <jguice@gmail.com>
+description: |
+  Local, no-cloud push-to-talk voice dictation for Linux.
+
+  Hold a key, speak, release — the transcription pastes into the focused
+  text field. Powered by NVIDIA Parakeet-TDT (INT8 ONNX) running offline.
+  Built to work on KDE Wayland, where other open dictation tools can't
+  grab global hotkeys or inject keystrokes.
+homepage: https://github.com/jguice/utter
+license: MIT
+section: utils
+priority: optional
+
+depends:
+  - ydotool
+  - alsa-utils
+  - wl-clipboard
+  - libnotify-bin | libnotify
+rpm:
+  group: Applications/System
+  summary: Local push-to-talk voice dictation for Linux
+deb:
+  fields:
+    Vcs-Browser: https://github.com/jguice/utter
+    Vcs-Git: https://github.com/jguice/utter.git
+
+contents:
+  - src: ../target/release/utter
+    dst: /usr/bin/utter
+    file_info:
+      mode: 0755
+
+  - src: ./udev/90-utter.rules
+    dst: /usr/lib/udev/rules.d/90-utter.rules
+    file_info:
+      mode: 0644
+
+  - src: ./systemd/utter-daemon.service
+    dst: /usr/lib/systemd/user/utter-daemon.service
+    file_info:
+      mode: 0644
+
+  - src: ./systemd/utter-watcher.service
+    dst: /usr/lib/systemd/user/utter-watcher.service
+    file_info:
+      mode: 0644
+
+  - src: ./systemd/ydotool-owner.conf
+    dst: /etc/systemd/system/ydotool.service.d/owner.conf
+    file_info:
+      mode: 0644
+
+  - src: ../scripts/download-model.sh
+    dst: /usr/share/utter/download-model.sh
+    file_info:
+      mode: 0755
+
+  - src: ../LICENSE
+    dst: /usr/share/doc/utter/LICENSE
+
+  - src: ../NOTICE
+    dst: /usr/share/doc/utter/NOTICE
+
+  - src: ../README.md
+    dst: /usr/share/doc/utter/README.md
+
+  - src: ../BACKLOG.md
+    dst: /usr/share/doc/utter/BACKLOG.md
+
+scripts:
+  postinstall: ./scripts/postinstall.sh
+  preremove: ./scripts/preremove.sh
+  postremove: ./scripts/postremove.sh
+
+overrides:
+  deb:
+    depends:
+      - ydotool
+      - alsa-utils
+      - wl-clipboard
+      - libnotify-bin
+  rpm:
+    depends:
+      - ydotool
+      - alsa-utils
+      - wl-clipboard
+      - libnotify

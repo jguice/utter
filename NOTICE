@@ -1,0 +1,25 @@
+utter depends on external models and libraries with their own licenses.
+
+## Speech recognition model
+
+**NVIDIA Parakeet-TDT 0.6B v3**
+- Upstream: https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+- ONNX conversion used here: https://huggingface.co/istupakov/parakeet-tdt-0.6b-v3-onnx
+- License: CC-BY-4.0
+- Attribution: Transcription powered by NVIDIA's Parakeet-TDT 0.6B v3 model,
+  converted to ONNX by Ilya Stupakov.
+
+When redistributing this project in a form that includes or implies use of the
+model, preserve this attribution per CC-BY-4.0 §3(a).
+
+## Rust dependencies
+
+See `Cargo.toml` and `Cargo.lock` for the full dependency tree. All direct
+dependencies are under permissive licenses (MIT, Apache-2.0, or both). Run
+`cargo license` or `cargo about` for a full audit if publishing.
+
+Notable dependencies:
+- transcribe-rs (MIT) — model inference wrapper
+- ort (MIT/Apache-2.0) — ONNX Runtime Rust bindings
+- tokio (MIT) — async runtime
+- evdev (Apache-2.0) — /dev/input event reading
