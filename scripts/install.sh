@@ -105,8 +105,32 @@ fi
 
 # --- 3. build + install binary ----------------------------------------------
 
+# Stop running utter services before cargo install so it doesn't hit ETXTBSY
+# on a repeat-run upgrade. Remember whether they were running so we can
+# restart them after the install step finishes.
+RESTART_DAEMON=0
+RESTART_WATCHER=0
+if systemctl --user is-active --quiet utter-daemon 2>/dev/null; then
+  RESTART_DAEMON=1
+fi
+if systemctl --user is-active --quiet utter-watcher 2>/dev/null; then
+  RESTART_WATCHER=1
+fi
+if [[ $RESTART_DAEMON -eq 1 || $RESTART_WATCHER -eq 1 ]]; then
+  step "Stopping utter services for upgrade"
+  systemctl --user stop utter-watcher utter-daemon 2>/dev/null || true
+fi
+
 step "Building + installing utter (this takes a few minutes on first run)"
-cargo install --path . --locked
+cargo install --path . --locked --force
+
+if [[ $RESTART_DAEMON -eq 1 ]]; then
+  systemctl --user start utter-daemon || true
+  sleep 1
+fi
+if [[ $RESTART_WATCHER -eq 1 ]]; then
+  systemctl --user start utter-watcher || true
+fi
 
 # --- 4. download the model ---------------------------------------------------
 
