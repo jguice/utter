@@ -12,6 +12,9 @@ use tokio::sync::Mutex;
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
 
+mod config;
+use config::Config;
+
 #[derive(Parser)]
 #[command(
     name = "utter",
@@ -33,7 +36,8 @@ enum Cmd {
     },
     /// Begin recording.
     Start,
-    /// Stop recording, transcribe, emit text to clipboard (auto-paste if UTTER_AUTOTYPE=1).
+    /// Stop recording, transcribe, write to the primary selection, and
+    /// auto-paste via Shift+Insert (unless `autotype = false` in config).
     Stop,
     /// Start if idle, stop if recording.
     Toggle,
@@ -47,13 +51,16 @@ enum Cmd {
         /// Key to watch. Either a named alias (rightmeta, leftmeta, rightctrl,
         /// capslock, f1..f20, Apple aliases rightcmd/leftcmd/rightoption/etc.)
         /// or a raw evdev keycode as digits (e.g. `--key 70` for scroll lock,
-        /// `--key 194` for f24). `utter set-key` picks one interactively.
-        #[arg(long, default_value = "rightmeta")]
-        key: String,
+        /// `--key 194` for f24). If omitted, the watcher reads `key` from
+        /// `~/.config/utter/config.toml` (default `rightmeta`). `utter
+        /// set-key` writes the config for you.
+        #[arg(long)]
+        key: Option<String>,
     },
     /// Interactively pick the push-to-talk key. Stops the watcher, listens
     /// for a press + release on any keyboard, then (unless --dry-run)
-    /// writes a systemd user override so the watcher uses that key.
+    /// writes the chosen key to ~/.config/utter/config.toml and
+    /// restarts the watcher.
     SetKey {
         /// Just report the detected key — don't save or restart the watcher.
         #[arg(long)]
@@ -97,7 +104,7 @@ async fn main() -> Result<()> {
             println!("{}", socket_path()?.display());
             Ok(())
         }
-        Cmd::Watch { key } => run_watcher(&key).await,
+        Cmd::Watch { key } => run_watcher(key.as_deref()).await,
         Cmd::SetKey { dry_run, timeout } => run_set_key(dry_run, timeout).await,
     }
 }
@@ -127,9 +134,22 @@ enum State {
 struct Daemon {
     model: Arc<Mutex<ParakeetModel>>,
     state: Mutex<State>,
+    config: Config,
 }
 
 async fn run_daemon(model_override: Option<PathBuf>) -> Result<()> {
+    let config_path = Config::default_path()?;
+    let env = config::utter_env_snapshot();
+    let cfg = Config::load_or_migrate(&config_path, &env)?;
+    log::info!(
+        "config loaded from {} (autotype={}, clipboard={}, cleanup={}, notify={})",
+        config_path.display(),
+        cfg.autotype,
+        cfg.clipboard,
+        cfg.cleanup,
+        cfg.notify,
+    );
+
     let model_dir = model_override.map(Ok).unwrap_or_else(default_model_dir)?;
     if !model_dir.exists() {
         return Err(anyhow!(
@@ -157,6 +177,7 @@ async fn run_daemon(model_override: Option<PathBuf>) -> Result<()> {
     let daemon = Arc::new(Daemon {
         model: Arc::new(Mutex::new(model)),
         state: Mutex::new(State::Idle),
+        config: cfg,
     });
 
     let sock_cleanup = socket.clone();
@@ -238,7 +259,7 @@ async fn start_recording(daemon: &Daemon) -> Result<()> {
     }
     let wav_path = fresh_wav_path();
     log::info!("recording to {}", wav_path.display());
-    notify("\u{1f3a4} Recording…", "", 1500).await;
+    notify("\u{1f3a4} Recording…", "", 1500, daemon.config.notify).await;
     let child = Command::new("arecord")
         .args(["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav"])
         .arg(&wav_path)
@@ -279,6 +300,7 @@ async fn stop_and_transcribe(daemon: &Daemon) -> Result<String> {
             "Utter: no audio",
             "Hold the key longer, or check your mic",
             3000,
+            daemon.config.notify,
         )
         .await;
         return Err(anyhow!(
@@ -314,12 +336,10 @@ async fn stop_and_transcribe(daemon: &Daemon) -> Result<String> {
 
     let _ = tokio::fs::remove_file(&wav_path).await;
 
-    // Post-process: drop filler words, collapse stuttered repetitions.
-    // Default on; disable with UTTER_CLEANUP=0.
-    let cleaned = if std::env::var("UTTER_CLEANUP").ok().as_deref() == Some("0") {
-        text.trim().to_string()
-    } else {
+    let cleaned = if daemon.config.cleanup {
         cleanup_transcription(text.trim())
+    } else {
+        text.trim().to_string()
     };
 
     // Append a trailing space so consecutive dictations don't smash together
@@ -330,7 +350,7 @@ async fn stop_and_transcribe(daemon: &Daemon) -> Result<String> {
         format!("{cleaned} ")
     };
     if !out.is_empty() {
-        emit_text(&out).await;
+        emit_text(&out, &daemon.config).await;
     }
     Ok(out)
 }
@@ -418,26 +438,23 @@ fn cleanup_transcription(text: &str) -> String {
     joined.trim().to_string()
 }
 
-async fn emit_text(text: &str) {
+async fn emit_text(text: &str, cfg: &Config) {
     // Always write the primary selection — it's what Shift+Insert
     // reads from below, and mouse-selecting any text overwrites it
     // anyway, so the "pollution" cost is negligible. The regular
-    // clipboard is deliberately left alone so whatever the user last
-    // copied (a password, a URL, a snippet) is preserved. Users who
-    // want dictations to land in their clipboard history (e.g. they
-    // run a clipboard manager) can opt in with UTTER_CLIPBOARD=1.
-    if let Err(e) = wl_copy(text).await {
+    // clipboard is left alone by default so whatever the user last
+    // copied (a password, a URL, a snippet) is preserved;
+    // `clipboard = true` in config opts into writing it for
+    // clipboard-manager users.
+    if let Err(e) = wl_copy(text, cfg.clipboard).await {
         log::warn!("wl-copy failed: {e:#}");
     }
-    if std::env::var("UTTER_AUTOTYPE").ok().as_deref() != Some("1") {
+    if !cfg.autotype {
         return;
     }
     // LEFTSHIFT=42, INSERT=110 — kernel keycodes from
     // /usr/include/linux/input-event-codes.h. Sequence is
-    // press-press-release-release. Shift+Insert pastes from the
-    // primary selection in every terminal and GTK/Qt text input we've
-    // tested. If a real app turns up that ignores it, see
-    // BACKLOG.md → Configuration.
+    // press-press-release-release.
     if let Err(e) = ydotool_keys(&["42:1", "110:1", "110:0", "42:0"]).await {
         log::warn!("paste failed: {e:#}");
     }
@@ -449,22 +466,19 @@ enum Selection {
     Clipboard,
 }
 
-/// Which wl-copy targets to write based on the `UTTER_CLIPBOARD` env var.
-/// Default is primary-only; `UTTER_CLIPBOARD=1` also writes the regular
-/// clipboard for users who want dictations in their clipboard history.
-/// Anything else (`0`, empty, unset, bogus value) is treated as "don't
-/// pollute the clipboard."
-fn selections_to_write(utter_clipboard_env: Option<&str>) -> &'static [Selection] {
-    if utter_clipboard_env == Some("1") {
+/// Which wl-copy targets to write. `also_clipboard = false` (the default)
+/// writes only the primary selection and leaves the regular clipboard
+/// untouched.
+fn selections_to_write(also_clipboard: bool) -> &'static [Selection] {
+    if also_clipboard {
         &[Selection::Primary, Selection::Clipboard]
     } else {
         &[Selection::Primary]
     }
 }
 
-async fn wl_copy(text: &str) -> Result<()> {
-    let env_val = std::env::var("UTTER_CLIPBOARD").ok();
-    for selection in selections_to_write(env_val.as_deref()) {
+async fn wl_copy(text: &str, also_clipboard: bool) -> Result<()> {
+    for selection in selections_to_write(also_clipboard) {
         let mut cmd = Command::new("wl-copy");
         if *selection == Selection::Primary {
             cmd.arg("--primary");
@@ -502,11 +516,8 @@ async fn ydotool_keys(codes: &[&str]) -> Result<()> {
     Ok(())
 }
 
-async fn notify(summary: &str, body: &str, expire_ms: u64) {
-    // Opt-in. Most users are fine with just the system mic icon Plasma
-    // puts in the tray while audio is captured, and don't want an extra
-    // toast on every hotkey press.
-    if std::env::var("UTTER_NOTIFY").ok().as_deref() != Some("1") {
+async fn notify(summary: &str, body: &str, expire_ms: u64, enabled: bool) {
+    if !enabled {
         return;
     }
     let _ = Command::new("notify-send")
@@ -650,8 +661,11 @@ fn parse_key_name(name: &str) -> Result<evdev::KeyCode> {
     ))
 }
 
-async fn run_watcher(key_name: &str) -> Result<()> {
-    let target = parse_key_name(key_name)?;
+async fn run_watcher(key_arg: Option<&str>) -> Result<()> {
+    // --key flag wins; otherwise fall back to config.key.
+    let cfg = Config::load_or_migrate(&Config::default_path()?, &config::utter_env_snapshot())?;
+    let key_name = key_arg.unwrap_or(&cfg.key).to_string();
+    let target = parse_key_name(&key_name)?;
     log::info!("watching for key {key_name} (code {})", target.code());
 
     let matching: Vec<(std::path::PathBuf, evdev::Device)> = evdev::enumerate()
@@ -867,9 +881,40 @@ async fn pick_key_and_maybe_save(dry_run: bool, timeout_secs: u64) -> Result<()>
         return Ok(());
     }
 
-    write_watcher_override(&name)?;
-    println!("Saved override for key `{name}`.");
+    save_key_to_config(&name)?;
+    println!("Saved key `{name}` to ~/.config/utter/config.toml.");
     Ok(())
+}
+
+/// Persist the chosen PTT key into the user's config file, preserving
+/// whatever other values the file currently holds. Also removes a stale
+/// pre-config-file `utter-watcher.service.d/override.conf` if present —
+/// that file would otherwise shadow the new config-file key via
+/// systemd's `ExecStart=` override.
+fn save_key_to_config(key_name: &str) -> Result<()> {
+    let path = Config::default_path()?;
+    let env = config::utter_env_snapshot();
+    let cfg = Config::load_or_migrate(&path, &env)?.with_key(key_name);
+    cfg.save_to(&path)?;
+    remove_stale_watcher_override();
+    Ok(())
+}
+
+fn remove_stale_watcher_override() {
+    let Some(config_dir) = dirs::config_dir() else { return; };
+    let override_path = config_dir.join("systemd/user/utter-watcher.service.d/override.conf");
+    if !override_path.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::remove_file(&override_path) {
+        log::warn!("couldn't remove stale {}: {e:#}", override_path.display());
+        return;
+    }
+    // Best-effort rmdir of the now-empty drop-in dir.
+    if let Some(parent) = override_path.parent() {
+        let _ = std::fs::remove_dir(parent);
+    }
+    log::info!("removed stale systemd drop-in at {}", override_path.display());
 }
 
 async fn watch_first_press_release(
@@ -897,37 +942,6 @@ async fn watch_first_press_release(
     }
 }
 
-fn write_watcher_override(key_name: &str) -> Result<()> {
-    let config_dir = dirs::config_dir().ok_or_else(|| anyhow!("no XDG config dir"))?;
-    // Resolve the binary path via /proc/self/exe — works whether utter is
-    // installed at /usr/bin/utter (package) or ~/.cargo/bin/utter (source).
-    let exe = std::env::current_exe()
-        .context("reading /proc/self/exe to resolve utter's binary path")?;
-    write_watcher_override_at(&config_dir, &exe, key_name)
-}
-
-fn write_watcher_override_at(
-    config_dir: &std::path::Path,
-    exe: &std::path::Path,
-    key_name: &str,
-) -> Result<()> {
-    let override_dir = config_dir.join("systemd/user/utter-watcher.service.d");
-    std::fs::create_dir_all(&override_dir)?;
-    let override_path = override_dir.join("override.conf");
-
-    let content = format!(
-        "# Written by `utter set-key` — edit at your own risk, or re-run the command.\n\
-         [Service]\n\
-         ExecStart=\n\
-         ExecStart={} watch --key {}\n",
-        exe.display(),
-        key_name,
-    );
-    std::fs::write(&override_path, content)
-        .with_context(|| format!("writing {}", override_path.display()))?;
-    Ok(())
-}
-
 fn watcher_is_active() -> bool {
     std::process::Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", "utter-watcher.service"])
@@ -947,9 +961,8 @@ fn run_systemctl_user(args: &[&str]) -> std::io::Result<std::process::ExitStatus
 mod tests {
     use super::{
         canonical_name_for, cleanup_transcription, parse_key_name, selections_to_write,
-        write_watcher_override_at, Selection,
+        Selection,
     };
-    use std::path::PathBuf;
 
     #[test]
     fn drops_fillers() {
@@ -1096,69 +1109,16 @@ mod tests {
     }
 
     #[test]
-    fn write_watcher_override_writes_expected_contents() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exe = PathBuf::from("/usr/bin/utter");
-        write_watcher_override_at(tmp.path(), &exe, "rightmeta").unwrap();
-
-        let written = std::fs::read_to_string(
-            tmp.path().join("systemd/user/utter-watcher.service.d/override.conf"),
-        )
-        .unwrap();
-        // Empty ExecStart= before our override is required by systemd to
-        // reset the inherited ExecStart from the package unit — otherwise
-        // systemd refuses the override.
-        assert!(written.contains("\nExecStart=\nExecStart=/usr/bin/utter watch --key rightmeta\n"));
-        assert!(written.starts_with("# Written by `utter set-key`"));
-    }
-
-    #[test]
-    fn write_watcher_override_accepts_numeric_key() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exe = PathBuf::from("/home/alice/.cargo/bin/utter");
-        write_watcher_override_at(tmp.path(), &exe, "194").unwrap();
-
-        let written = std::fs::read_to_string(
-            tmp.path().join("systemd/user/utter-watcher.service.d/override.conf"),
-        )
-        .unwrap();
-        assert!(written.contains("ExecStart=/home/alice/.cargo/bin/utter watch --key 194\n"));
-    }
-
-    #[test]
     fn selections_default_to_primary_only() {
-        // Unset, empty, "0", and any bogus value should all mean "don't
-        // pollute the regular clipboard."
-        assert_eq!(selections_to_write(None), &[Selection::Primary]);
-        assert_eq!(selections_to_write(Some("")), &[Selection::Primary]);
-        assert_eq!(selections_to_write(Some("0")), &[Selection::Primary]);
-        assert_eq!(selections_to_write(Some("no")), &[Selection::Primary]);
-        assert_eq!(selections_to_write(Some("yes")), &[Selection::Primary]);
-        assert_eq!(selections_to_write(Some("true")), &[Selection::Primary]);
+        assert_eq!(selections_to_write(false), &[Selection::Primary]);
     }
 
     #[test]
-    fn selections_write_both_when_utter_clipboard_is_one() {
+    fn selections_write_both_when_also_clipboard() {
         assert_eq!(
-            selections_to_write(Some("1")),
+            selections_to_write(true),
             &[Selection::Primary, Selection::Clipboard]
         );
     }
 
-    #[test]
-    fn write_watcher_override_creates_parent_dirs_and_overwrites() {
-        let tmp = tempfile::tempdir().unwrap();
-        let exe = PathBuf::from("/usr/bin/utter");
-
-        write_watcher_override_at(tmp.path(), &exe, "capslock").unwrap();
-        // Second call must overwrite cleanly (no append, no error).
-        write_watcher_override_at(tmp.path(), &exe, "f13").unwrap();
-
-        let written = std::fs::read_to_string(
-            tmp.path().join("systemd/user/utter-watcher.service.d/override.conf"),
-        )
-        .unwrap();
-        assert!(written.contains("watch --key f13\n"));
-        assert!(!written.contains("watch --key capslock"));
-    }
 }

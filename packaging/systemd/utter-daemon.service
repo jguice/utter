@@ -8,10 +8,9 @@ Type=simple
 ExecStart=/usr/bin/utter daemon
 Restart=on-failure
 RestartSec=2
-# Write transcriptions to the primary selection and auto-paste via
-# Shift+Insert. UTTER_AUTOTYPE=0 suppresses the keystroke (user middle-
-# clicks or Shift+Inserts manually); the primary selection is still set.
-Environment=UTTER_AUTOTYPE=1
+# User-facing knobs (autotype, clipboard, cleanup, notify, PTT key) live
+# in ~/.config/utter/config.toml. YDOTOOL_SOCKET and RUST_LOG remain here
+# because they configure third-party tools, not utter itself.
 Environment=YDOTOOL_SOCKET=/tmp/.ydotool_socket
 Environment=RUST_LOG=info
 

@@ -6,10 +6,11 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-# Change --key to any name parse_key_name() accepts (rightmeta, leftmeta,
-# rightctrl, capslock, f13, ...). The user MUST be in the `input` group
-# for /dev/input/event* to be readable.
-ExecStart=%h/.cargo/bin/utter watch --key rightmeta
+# The key comes from ~/.config/utter/config.toml (field `key`, default
+# `rightmeta`). `utter set-key` updates that file. Pass `--key <name>`
+# explicitly here to override the config. The user MUST be in the
+# `input` group for /dev/input/event* to be readable.
+ExecStart=%h/.cargo/bin/utter watch
 Restart=on-failure
 RestartSec=2
 Environment=RUST_LOG=info
