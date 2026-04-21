@@ -123,30 +123,31 @@ Default contents:
 key = "rightmeta"
 
 # Synthesize Shift+Insert to paste. false = user pastes manually.
-autotype = true
+auto_paste = true
 
 # Also write dictations to the regular clipboard (for clipboard-manager
 # users). Default leaves the regular clipboard untouched.
-clipboard = false
+write_clipboard = false
 
-# Drop fillers (uh, um, ...) and collapse stutters.
-cleanup = true
+# Drop fillers (uh, um, er, ah, erm, hmm) and collapse stuttered
+# repetitions (`I I I think` → `I think`).
+filter_filler_words = true
 
 # Fire notify-send on recording start / errors.
-notify = false
+show_notifications = false
 ```
 
 ### Env var overrides
 
-Every field above is overridable at runtime via an environment variable with the same name, upper-cased and prefixed `UTTER_` — e.g. `UTTER_AUTOTYPE=0` wins over `autotype = true` in the file. Useful for one-off runs (`UTTER_NOTIFY=1 utter daemon`) or systemd-drop-in tweaks without editing the config file:
+Every field above is overridable at runtime via an environment variable with the same name, upper-cased and prefixed `UTTER_` — e.g. `UTTER_AUTO_PASTE=0` wins over `auto_paste = true` in the file. Useful for one-off runs (`UTTER_SHOW_NOTIFICATIONS=1 utter daemon`) or systemd-drop-in tweaks without editing the config file:
 
-| Env var           | Values    | Overrides field | Purpose                                                                 |
-|-------------------|-----------|-----------------|-------------------------------------------------------------------------|
-| `UTTER_KEY`       | name/code | `key`           | PTT key.                                                                |
-| `UTTER_AUTOTYPE`  | `0` / `1` | `autotype`      | Synthesize Shift+Insert paste.                                          |
-| `UTTER_CLIPBOARD` | `0` / `1` | `clipboard`     | Also write the regular clipboard (not just primary selection).          |
-| `UTTER_CLEANUP`   | `0` / `1` | `cleanup`       | Drop fillers (uh/um/er/ah/erm/hmm), collapse stutters.                  |
-| `UTTER_NOTIFY`    | `0` / `1` | `notify`        | `notify-send` toast on recording start / error.                         |
+| Env var                     | Values    | Overrides field       | Purpose                                                                 |
+|-----------------------------|-----------|-----------------------|-------------------------------------------------------------------------|
+| `UTTER_KEY`                 | name/code | `key`                 | PTT key.                                                                |
+| `UTTER_AUTO_PASTE`          | `0` / `1` | `auto_paste`          | Synthesize Shift+Insert paste.                                          |
+| `UTTER_WRITE_CLIPBOARD`     | `0` / `1` | `write_clipboard`     | Also write the regular clipboard (not just primary selection).          |
+| `UTTER_FILTER_FILLER_WORDS` | `0` / `1` | `filter_filler_words` | Drop fillers (uh/um/er/ah/erm/hmm), collapse stutters.                  |
+| `UTTER_SHOW_NOTIFICATIONS`  | `0` / `1` | `show_notifications`  | `notify-send` toast on recording start / error.                         |
 
 These stay env-only (third-party tools, not utter's config):
 
@@ -173,7 +174,7 @@ That covers both "what evdev name does this key have?" and "can utter actually r
 
 While you're holding the key, your desktop's standard **microphone-in-use icon** (the small mic that appears in KDE's system tray, GNOME's top bar, etc.) is the intentional visual cue that utter is listening. When you release the key, recording stops and the icon disappears. utter doesn't ship a custom overlay widget on purpose — the system indicator is already there, already correct, and doesn't draw anything ugly over your screen.
 
-For a noisier feedback mode (a toast on start / errors), set `UTTER_NOTIFY=1` (see the table above).
+For a noisier feedback mode (a toast on start / errors), set `show_notifications = true` in the config file or `UTTER_SHOW_NOTIFICATIONS=1` in the environment.
 
 ### Manual override (if you'd rather)
 

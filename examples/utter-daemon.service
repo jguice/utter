@@ -8,7 +8,8 @@ Type=simple
 ExecStart=%h/.cargo/bin/utter daemon
 Restart=on-failure
 RestartSec=2
-# User-facing knobs (autotype, clipboard, cleanup, notify, PTT key) live
+# User-facing knobs (auto_paste, write_clipboard, filter_filler_words,
+# show_notifications, PTT key) live
 # in ~/.config/utter/config.toml. YDOTOOL_SOCKET and RUST_LOG remain here
 # because they configure third-party tools, not utter itself. ydotoold's
 # default socket path differs from its CLI's default when XDG_RUNTIME_DIR

@@ -37,7 +37,7 @@ enum Cmd {
     /// Begin recording.
     Start,
     /// Stop recording, transcribe, write to the primary selection, and
-    /// auto-paste via Shift+Insert (unless `autotype = false` in config).
+    /// auto-paste via Shift+Insert (unless `auto_paste = false` in config).
     Stop,
     /// Start if idle, stop if recording.
     Toggle,
@@ -142,12 +142,12 @@ async fn run_daemon(model_override: Option<PathBuf>) -> Result<()> {
     let env = config::utter_env_snapshot();
     let cfg = Config::load_or_migrate(&config_path, &env)?;
     log::info!(
-        "config loaded from {} (autotype={}, clipboard={}, cleanup={}, notify={})",
+        "config loaded from {} (auto_paste={}, write_clipboard={}, filter_filler_words={}, show_notifications={})",
         config_path.display(),
-        cfg.autotype,
-        cfg.clipboard,
-        cfg.cleanup,
-        cfg.notify,
+        cfg.auto_paste,
+        cfg.write_clipboard,
+        cfg.filter_filler_words,
+        cfg.show_notifications,
     );
 
     let model_dir = model_override.map(Ok).unwrap_or_else(default_model_dir)?;
@@ -259,7 +259,7 @@ async fn start_recording(daemon: &Daemon) -> Result<()> {
     }
     let wav_path = fresh_wav_path();
     log::info!("recording to {}", wav_path.display());
-    notify("\u{1f3a4} Recording…", "", 1500, daemon.config.notify).await;
+    notify("\u{1f3a4} Recording…", "", 1500, daemon.config.show_notifications).await;
     let child = Command::new("arecord")
         .args(["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav"])
         .arg(&wav_path)
@@ -300,7 +300,7 @@ async fn stop_and_transcribe(daemon: &Daemon) -> Result<String> {
             "Utter: no audio",
             "Hold the key longer, or check your mic",
             3000,
-            daemon.config.notify,
+            daemon.config.show_notifications,
         )
         .await;
         return Err(anyhow!(
@@ -336,7 +336,7 @@ async fn stop_and_transcribe(daemon: &Daemon) -> Result<String> {
 
     let _ = tokio::fs::remove_file(&wav_path).await;
 
-    let cleaned = if daemon.config.cleanup {
+    let cleaned = if daemon.config.filter_filler_words {
         cleanup_transcription(text.trim())
     } else {
         text.trim().to_string()
@@ -439,25 +439,92 @@ fn cleanup_transcription(text: &str) -> String {
 }
 
 async fn emit_text(text: &str, cfg: &Config) {
-    // Always write the primary selection — it's what Shift+Insert
-    // reads from below, and mouse-selecting any text overwrites it
-    // anyway, so the "pollution" cost is negligible. The regular
-    // clipboard is left alone by default so whatever the user last
-    // copied (a password, a URL, a snippet) is preserved;
-    // `clipboard = true` in config opts into writing it for
-    // clipboard-manager users.
-    if let Err(e) = wl_copy(text, cfg.clipboard).await {
+    let t0 = Instant::now();
+    log::info!(
+        "emit: start (len={}, write_clipboard={}, auto_paste={})",
+        text.len(),
+        cfg.write_clipboard,
+        cfg.auto_paste
+    );
+
+    if let Err(e) = wl_copy(text, cfg.write_clipboard).await {
         log::warn!("wl-copy failed: {e:#}");
     }
-    if !cfg.autotype {
-        return;
+    log::info!("emit: wl_copy returned at +{:?}", t0.elapsed());
+
+    // Poll the primary selection until it matches our text (or bail after
+    // a budget). Tells us whether the compositor has accepted our offer
+    // before we fire the paste keystroke. Each iteration spawns a
+    // wl-paste subprocess — cheap (<5ms on KWin) relative to the real
+    // paste failure mode (cursor-blinks-no-paste), and every attempt is
+    // logged so we can see what's actually happening.
+    if cfg.auto_paste {
+        let matched = verify_primary(text.trim_end(), t0).await;
+        if !matched {
+            log::warn!("emit: primary never matched before paste — firing anyway");
+        }
+        if let Err(e) = ydotool_keys(&["42:1", "110:1", "110:0", "42:0"]).await {
+            log::warn!("paste failed: {e:#}");
+        }
+        log::info!("emit: ydotool returned at +{:?}", t0.elapsed());
+    } else {
+        log::info!("emit: auto_paste off, not synthesizing paste");
     }
-    // LEFTSHIFT=42, INSERT=110 — kernel keycodes from
-    // /usr/include/linux/input-event-codes.h. Sequence is
-    // press-press-release-release.
-    if let Err(e) = ydotool_keys(&["42:1", "110:1", "110:0", "42:0"]).await {
-        log::warn!("paste failed: {e:#}");
+}
+
+async fn verify_primary(expected: &str, t0: Instant) -> bool {
+    // Budget: up to 300ms total, polling every 10ms. Real compositor
+    // latency observed so far is in the <50ms range; the high bound is
+    // so we don't hang if wl-paste breaks entirely.
+    let deadline = std::time::Duration::from_millis(300);
+    let poll = std::time::Duration::from_millis(10);
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        match read_primary().await {
+            Ok(got) => {
+                let got_trim = got.trim_end();
+                if got_trim == expected {
+                    log::info!(
+                        "emit: primary matched after {attempts} poll(s) at +{:?}",
+                        t0.elapsed()
+                    );
+                    return true;
+                }
+                if attempts == 1 || t0.elapsed() >= deadline {
+                    let preview: String =
+                        got_trim.chars().take(60).collect::<String>() + if got_trim.chars().count() > 60 { "…" } else { "" };
+                    log::info!(
+                        "emit: primary mismatch attempt={attempts} elapsed={:?} got={:?}",
+                        t0.elapsed(),
+                        preview
+                    );
+                }
+            }
+            Err(e) => {
+                log::info!("emit: wl-paste failed (attempt {attempts}): {e:#}");
+            }
+        }
+        if t0.elapsed() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(poll).await;
     }
+}
+
+async fn read_primary() -> Result<String> {
+    let output = Command::new("wl-paste")
+        .arg("--primary")
+        .arg("--no-newline")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .context("spawn wl-paste")?;
+    if !output.status.success() {
+        return Err(anyhow!("wl-paste exited {}", output.status));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

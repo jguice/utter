@@ -16,24 +16,26 @@ pub struct Config {
     /// Synthesize Shift+Insert after dictation to paste into the focused
     /// window. When false, only the primary selection is written and the
     /// user pastes manually.
-    pub autotype: bool,
+    pub auto_paste: bool,
     /// Also write dictations to the regular clipboard alongside the
     /// primary selection. Default leaves the regular clipboard untouched.
-    pub clipboard: bool,
-    /// Drop filler words and collapse stutters before emitting text.
-    pub cleanup: bool,
+    pub write_clipboard: bool,
+    /// Drop filler words (uh, um, er, ah, erm, hmm) and collapse stuttered
+    /// repetitions (`I I I think` → `I think`, `wh wh wh what` → `what`)
+    /// before emitting text.
+    pub filter_filler_words: bool,
     /// Fire a `notify-send` toast on recording start and errors.
-    pub notify: bool,
+    pub show_notifications: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             key: "rightmeta".to_string(),
-            autotype: true,
-            clipboard: false,
-            cleanup: true,
-            notify: false,
+            auto_paste: true,
+            write_clipboard: false,
+            filter_filler_words: true,
+            show_notifications: false,
         }
     }
 }
@@ -52,51 +54,56 @@ impl Config {
     pub fn to_toml(&self) -> String {
         format!(
             "# utter configuration. Managed by `utter set-key` and edited by hand.\n\
-             # Env vars (UTTER_KEY, UTTER_AUTOTYPE, UTTER_CLIPBOARD, UTTER_CLEANUP,\n\
-             # UTTER_NOTIFY) override any value set here.\n\
+             # Env vars (UTTER_KEY, UTTER_AUTO_PASTE, UTTER_WRITE_CLIPBOARD,\n\
+             # UTTER_FILTER_FILLER_WORDS, UTTER_SHOW_NOTIFICATIONS) override any\n\
+             # value set here.\n\
              \n\
              # PTT key: named alias (rightmeta, capslock, f13, ...) or numeric evdev\n\
              # keycode as a string.\n\
              key = {key:?}\n\
              \n\
              # Synthesize Shift+Insert to paste. false = user pastes manually.\n\
-             autotype = {autotype}\n\
+             auto_paste = {auto_paste}\n\
              \n\
              # Also write dictations to the regular clipboard (for clipboard-manager\n\
              # users). Default leaves the regular clipboard untouched.\n\
-             clipboard = {clipboard}\n\
+             write_clipboard = {write_clipboard}\n\
              \n\
-             # Drop fillers (uh, um, ...) and collapse stutters.\n\
-             cleanup = {cleanup}\n\
+             # Drop fillers (uh, um, er, ah, erm, hmm) and collapse stuttered\n\
+             # repetitions (`I I I think` → `I think`).\n\
+             filter_filler_words = {filter_filler_words}\n\
              \n\
              # Fire notify-send on recording start / errors.\n\
-             notify = {notify}\n",
+             show_notifications = {show_notifications}\n",
             key = self.key,
-            autotype = self.autotype,
-            clipboard = self.clipboard,
-            cleanup = self.cleanup,
-            notify = self.notify,
+            auto_paste = self.auto_paste,
+            write_clipboard = self.write_clipboard,
+            filter_filler_words = self.filter_filler_words,
+            show_notifications = self.show_notifications,
         )
     }
 
     /// Apply UTTER_* env vars on top of `self`. Unrecognized values for
     /// boolean fields log a warning and keep the existing value — better
-    /// than silently treating `UTTER_AUTOTYPE=yes` as `false`.
+    /// than silently treating `UTTER_AUTO_PASTE=yes` as `false`.
     pub fn with_env_overrides(mut self, env: &HashMap<String, String>) -> Self {
         if let Some(v) = env.get("UTTER_KEY") {
             self.key = v.clone();
         }
-        if let Some(v) = env.get("UTTER_AUTOTYPE") {
-            self.autotype = parse_bool_env("UTTER_AUTOTYPE", v).unwrap_or(self.autotype);
+        if let Some(v) = env.get("UTTER_AUTO_PASTE") {
+            self.auto_paste = parse_bool_env("UTTER_AUTO_PASTE", v).unwrap_or(self.auto_paste);
         }
-        if let Some(v) = env.get("UTTER_CLIPBOARD") {
-            self.clipboard = parse_bool_env("UTTER_CLIPBOARD", v).unwrap_or(self.clipboard);
+        if let Some(v) = env.get("UTTER_WRITE_CLIPBOARD") {
+            self.write_clipboard =
+                parse_bool_env("UTTER_WRITE_CLIPBOARD", v).unwrap_or(self.write_clipboard);
         }
-        if let Some(v) = env.get("UTTER_CLEANUP") {
-            self.cleanup = parse_bool_env("UTTER_CLEANUP", v).unwrap_or(self.cleanup);
+        if let Some(v) = env.get("UTTER_FILTER_FILLER_WORDS") {
+            self.filter_filler_words =
+                parse_bool_env("UTTER_FILTER_FILLER_WORDS", v).unwrap_or(self.filter_filler_words);
         }
-        if let Some(v) = env.get("UTTER_NOTIFY") {
-            self.notify = parse_bool_env("UTTER_NOTIFY", v).unwrap_or(self.notify);
+        if let Some(v) = env.get("UTTER_SHOW_NOTIFICATIONS") {
+            self.show_notifications = parse_bool_env("UTTER_SHOW_NOTIFICATIONS", v)
+                .unwrap_or(self.show_notifications);
         }
         self
     }
@@ -184,20 +191,20 @@ mod tests {
     fn default_has_sensible_values() {
         let c = Config::default();
         assert_eq!(c.key, "rightmeta");
-        assert!(c.autotype, "autotype on by default");
-        assert!(!c.clipboard, "clipboard off by default — don't pollute");
-        assert!(c.cleanup, "cleanup on by default");
-        assert!(!c.notify, "notify off by default");
+        assert!(c.auto_paste, "auto_paste on by default");
+        assert!(!c.write_clipboard, "write_clipboard off by default — don't pollute");
+        assert!(c.filter_filler_words, "filter_filler_words on by default");
+        assert!(!c.show_notifications, "show_notifications off by default");
     }
 
     #[test]
     fn toml_roundtrips_through_from_and_to() {
         let original = Config {
             key: "capslock".to_string(),
-            autotype: false,
-            clipboard: true,
-            cleanup: false,
-            notify: true,
+            auto_paste: false,
+            write_clipboard: true,
+            filter_filler_words: false,
+            show_notifications: true,
         };
         let text = original.to_toml();
         let parsed = Config::from_toml(&text).unwrap();
@@ -209,8 +216,8 @@ mod tests {
         let text = "key = \"f13\"\n";
         let c = Config::from_toml(text).unwrap();
         assert_eq!(c.key, "f13");
-        assert!(c.autotype, "other fields default");
-        assert!(!c.clipboard);
+        assert!(c.auto_paste, "other fields default");
+        assert!(!c.write_clipboard);
     }
 
     #[test]
@@ -232,27 +239,27 @@ mod tests {
         let base = Config::default();
         let e = env(&[
             ("UTTER_KEY", "f13"),
-            ("UTTER_AUTOTYPE", "0"),
-            ("UTTER_CLIPBOARD", "1"),
-            ("UTTER_CLEANUP", "0"),
-            ("UTTER_NOTIFY", "1"),
+            ("UTTER_AUTO_PASTE", "0"),
+            ("UTTER_WRITE_CLIPBOARD", "1"),
+            ("UTTER_FILTER_FILLER_WORDS", "0"),
+            ("UTTER_SHOW_NOTIFICATIONS", "1"),
         ]);
         let c = base.with_env_overrides(&e);
         assert_eq!(c.key, "f13");
-        assert!(!c.autotype);
-        assert!(c.clipboard);
-        assert!(!c.cleanup);
-        assert!(c.notify);
+        assert!(!c.auto_paste);
+        assert!(c.write_clipboard);
+        assert!(!c.filter_filler_words);
+        assert!(c.show_notifications);
     }
 
     #[test]
     fn env_without_utter_vars_is_noop() {
         let base = Config {
             key: "capslock".to_string(),
-            autotype: false,
-            clipboard: true,
-            cleanup: false,
-            notify: true,
+            auto_paste: false,
+            write_clipboard: true,
+            filter_filler_words: false,
+            show_notifications: true,
         };
         let c = base.clone().with_env_overrides(&env(&[("PATH", "/usr/bin")]));
         assert_eq!(c, base);
@@ -261,22 +268,24 @@ mod tests {
     #[test]
     fn env_accepts_true_false_spellings() {
         let c = Config::default().with_env_overrides(&env(&[
-            ("UTTER_AUTOTYPE", "false"),
-            ("UTTER_CLIPBOARD", "true"),
+            ("UTTER_AUTO_PASTE", "false"),
+            ("UTTER_WRITE_CLIPBOARD", "true"),
         ]));
-        assert!(!c.autotype);
-        assert!(c.clipboard);
+        assert!(!c.auto_paste);
+        assert!(c.write_clipboard);
     }
 
     #[test]
     fn env_bogus_bool_preserves_existing_value() {
         // Unrecognized strings log a warning and leave the field alone.
         let c = Config {
-            autotype: true,
+            auto_paste: true,
             ..Config::default()
         };
-        let with_bogus = c.clone().with_env_overrides(&env(&[("UTTER_AUTOTYPE", "yes")]));
-        assert!(with_bogus.autotype, "bogus value didn't flip the field");
+        let with_bogus = c
+            .clone()
+            .with_env_overrides(&env(&[("UTTER_AUTO_PASTE", "yes")]));
+        assert!(with_bogus.auto_paste, "bogus value didn't flip the field");
     }
 
     #[test]
@@ -286,51 +295,51 @@ mod tests {
         assert!(!path.exists());
 
         let e = env(&[
-            ("UTTER_AUTOTYPE", "0"),
+            ("UTTER_AUTO_PASTE", "0"),
             ("UTTER_KEY", "f13"),
         ]);
         let c = Config::load_or_migrate(&path, &e).unwrap();
 
         assert!(path.exists(), "config file written");
         assert_eq!(c.key, "f13");
-        assert!(!c.autotype);
+        assert!(!c.auto_paste);
 
         // File contents: persisted values. Re-reading gives the same config.
         let e_empty = HashMap::new();
         let c2 = Config::load_or_migrate(&path, &e_empty).unwrap();
         assert_eq!(c2.key, "f13");
-        assert!(!c2.autotype);
+        assert!(!c2.auto_paste);
     }
 
     #[test]
     fn load_or_migrate_reads_existing_file_and_env_wins() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("config.toml");
-        std::fs::write(&path, "key = \"capslock\"\nautotype = true\n").unwrap();
+        std::fs::write(&path, "key = \"capslock\"\nauto_paste = true\n").unwrap();
 
         // Env var overrides the file.
-        let e = env(&[("UTTER_AUTOTYPE", "0")]);
+        let e = env(&[("UTTER_AUTO_PASTE", "0")]);
         let c = Config::load_or_migrate(&path, &e).unwrap();
         assert_eq!(c.key, "capslock", "from file");
-        assert!(!c.autotype, "from env, overriding file");
+        assert!(!c.auto_paste, "from env, overriding file");
     }
 
     #[test]
     fn with_key_replaces_only_key_field() {
         let c = Config {
-            autotype: false,
-            clipboard: true,
-            cleanup: false,
-            notify: true,
+            auto_paste: false,
+            write_clipboard: true,
+            filter_filler_words: false,
+            show_notifications: true,
             key: "rightmeta".to_string(),
         };
         let updated = c.clone().with_key("f13");
         assert_eq!(updated.key, "f13");
         // Other fields preserved.
-        assert_eq!(updated.autotype, c.autotype);
-        assert_eq!(updated.clipboard, c.clipboard);
-        assert_eq!(updated.cleanup, c.cleanup);
-        assert_eq!(updated.notify, c.notify);
+        assert_eq!(updated.auto_paste, c.auto_paste);
+        assert_eq!(updated.write_clipboard, c.write_clipboard);
+        assert_eq!(updated.filter_filler_words, c.filter_filler_words);
+        assert_eq!(updated.show_notifications, c.show_notifications);
     }
 
     #[test]
