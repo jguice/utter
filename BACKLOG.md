@@ -51,6 +51,19 @@ about discoverability and auto-updates:
 
 ## Reliability
 
+- **Replace the `wl-paste` poll in `emit_text` with the Wayland protocol
+  via `wl-clipboard-rs`.** Current flow spawns `wl-copy --primary` as a
+  subprocess, then polls `wl-paste --primary` every 10 ms until the
+  primary selection matches our text (up to a 300 ms budget) before
+  firing the Shift+Insert chord. That's observable and bounded — but
+  it's still polling. `wl-clipboard-rs` talks the Wayland protocol
+  directly: `set_selection(primary, ...)` returns only after the
+  compositor has accepted the offer, which is the actual event we want
+  to wait on. Trade-offs: adds a dep, requires the daemon to maintain a
+  Wayland connection for the lifetime of the selection (wl-copy does
+  this via a fork-to-background daemon today), and error handling gets
+  more involved. Do this once we have another compositor-specific bug
+  that pushes us toward direct-protocol access anyway.
 - **Silence the `onnxruntime cpuid_info warning` on every CLI invocation.**
   On Apple Silicon / Asahi, ONNX Runtime prints `Unknown CPU vendor.
   cpuinfo_vendor value: 0` to stderr at shared-library load time — i.e.

@@ -62,7 +62,7 @@ Probably worth converting Linux to cpal too as a follow-up; unifies the codepath
 
 **Linux today:** `notify-send` subprocess (libnotify).
 
-**macOS:** `osascript -e 'display notification "..." with title "utter"'` is the zero-dependency path. Or native `UNUserNotificationCenter` via objc2 — nicer but adds a bind for a feature that's already opt-in via `UTTER_NOTIFY=1`. Go with osascript first; upgrade later if it feels janky.
+**macOS:** `osascript -e 'display notification "..." with title "utter"'` is the zero-dependency path. Or native `UNUserNotificationCenter` via objc2 — nicer but adds a bind for a feature that's already opt-in via `show_notifications = true`. Go with osascript first; upgrade later if it feels janky.
 
 ### 6. Service management
 
