@@ -103,21 +103,59 @@ Hold the push-to-talk key, speak, release. The transcription pastes into whichev
 
 ## Configuration
 
-utter runs as two systemd user services, each handling different concerns:
+utter runs as two systemd user services:
 
-- **`utter-daemon`** — loads the model, records audio, transcribes, pastes. Owns all the output-side environment variables in the table below.
-- **`utter-watcher`** — watches `/dev/input` for key events. Its only knob is which key triggers recording (`--key <name>` in its `ExecStart`); see [Change the push-to-talk key](#change-the-push-to-talk-key).
+- **`utter-daemon`** — loads the model, records audio, transcribes, emits text.
+- **`utter-watcher`** — watches `/dev/input` for the PTT key and tells the daemon when to start and stop.
 
-To change any of the env vars below, run `systemctl --user edit utter-daemon` and add an `[Service]` block with the overrides.
+Both read their user-facing settings from **`~/.config/utter/config.toml`**. The file is created on first daemon start (using defaults + any `UTTER_*` env vars you had set at the time) and re-read on every daemon restart. Edit it by hand or via `utter set-key` for the PTT key specifically. Restart the relevant service(s) to pick up changes:
 
-| Env var                  | Values                                         | Default          | Purpose                                                                 |
-|--------------------------|------------------------------------------------|------------------|-------------------------------------------------------------------------|
-| `UTTER_AUTOTYPE`      | `0` / `1`                                      | `1`              | When 0, writes the transcription to the primary selection but doesn't synthesize a paste keystroke — middle-click or Shift+Insert manually. |
-| `UTTER_CLIPBOARD`     | `0` / `1`                                      | `0`              | When 1, also writes the transcription to the regular clipboard (so it shows up in clipboard-manager history). Default leaves the regular clipboard untouched. |
-| `UTTER_CLEANUP`       | `0` / `1`                                      | `1`              | Drop fillers (uh/um/er/ah/erm/hmm), collapse stutters (`wh wh what`→`what`, `I I I think`→`I think`). Set 0 for raw Parakeet output. |
-| `UTTER_NOTIFY`        | `0` / `1`                                      | `0`              | When 1, fires a short `notify-send` toast on recording start / error.   |
-| `YDOTOOL_SOCKET`         | path                                           | `/tmp/.ydotool_socket` | Socket path for the ydotool daemon (only change if you relocated it). |
-| `RUST_LOG`               | `info`, `debug`, ...                           | `info`           | Log verbosity (visible via `journalctl --user -u utter-daemon`). |
+```bash
+systemctl --user restart utter-daemon utter-watcher
+```
+
+Default contents:
+
+```toml
+# utter configuration.
+
+# PTT key: named alias or numeric evdev keycode (as a string).
+key = "rightmeta"
+
+# Synthesize Shift+Insert to paste. false = user pastes manually.
+autotype = true
+
+# Also write dictations to the regular clipboard (for clipboard-manager
+# users). Default leaves the regular clipboard untouched.
+clipboard = false
+
+# Drop fillers (uh, um, ...) and collapse stutters.
+cleanup = true
+
+# Fire notify-send on recording start / errors.
+notify = false
+```
+
+### Env var overrides
+
+Every field above is overridable at runtime via an environment variable with the same name, upper-cased and prefixed `UTTER_` — e.g. `UTTER_AUTOTYPE=0` wins over `autotype = true` in the file. Useful for one-off runs (`UTTER_NOTIFY=1 utter daemon`) or systemd-drop-in tweaks without editing the config file:
+
+| Env var           | Values    | Overrides field | Purpose                                                                 |
+|-------------------|-----------|-----------------|-------------------------------------------------------------------------|
+| `UTTER_KEY`       | name/code | `key`           | PTT key.                                                                |
+| `UTTER_AUTOTYPE`  | `0` / `1` | `autotype`      | Synthesize Shift+Insert paste.                                          |
+| `UTTER_CLIPBOARD` | `0` / `1` | `clipboard`     | Also write the regular clipboard (not just primary selection).          |
+| `UTTER_CLEANUP`   | `0` / `1` | `cleanup`       | Drop fillers (uh/um/er/ah/erm/hmm), collapse stutters.                  |
+| `UTTER_NOTIFY`    | `0` / `1` | `notify`        | `notify-send` toast on recording start / error.                         |
+
+These stay env-only (third-party tools, not utter's config):
+
+| Env var          | Default                 | Purpose                                                                 |
+|------------------|-------------------------|-------------------------------------------------------------------------|
+| `YDOTOOL_SOCKET` | `/tmp/.ydotool_socket`  | Socket path for the ydotool daemon (only change if you relocated it).   |
+| `RUST_LOG`       | `info`                  | Log verbosity (`journalctl --user -u utter-daemon`).                    |
+
+Precedence: **CLI flag > env var > config file > default.**
 
 ### Change the push-to-talk key
 
@@ -127,7 +165,7 @@ Easiest: let utter detect the key for you.
 utter set-key
 ```
 
-Press and hold the key you want, then release. utter reports what it detected (e.g. `Detected: rightmeta (code 126)`), confirms the press **and** release both fired cleanly (so you know hold-to-talk will actually work on that key), and writes the override to `~/.config/systemd/user/utter-watcher.service.d/override.conf`. Pass `--dry-run` to just detect without saving.
+Press and hold the key you want, then release. utter reports what it detected (e.g. `Detected: rightmeta (code 126)`), confirms the press **and** release both fired cleanly (so you know hold-to-talk will actually work on that key), and writes the new key to `~/.config/utter/config.toml`. Pass `--dry-run` to just detect without saving.
 
 That covers both "what evdev name does this key have?" and "can utter actually read this key's events on my system?" in one step — useful if you remapped a key in your keyboard firmware (QMK, VIA, Karabiner-on-macOS-sibling-tool) or via a desktop utility, and you want to confirm it shows up as something usable.
 
@@ -139,30 +177,24 @@ For a noisier feedback mode (a toast on start / errors), set `UTTER_NOTIFY=1` (s
 
 ### Manual override (if you'd rather)
 
-`utter set-key` is a wrapper around editing the systemd unit. To do it by hand:
+`utter set-key` is a wrapper that edits `~/.config/utter/config.toml`. To do it by hand, open the file in your editor and change the `key = "..."` line:
 
-```bash
-systemctl --user edit utter-watcher
+```toml
+key = "capslock"
 ```
 
-In the editor that opens, add:
+Then restart the watcher: `systemctl --user restart utter-watcher`.
 
-```ini
-[Service]
-ExecStart=
-ExecStart=/usr/bin/utter watch --key capslock
-```
-
-The `--key` argument accepts either a named alias or a raw evdev keycode (as digits). Any key that exists in `/usr/include/linux/input-event-codes.h` works — the named list below is just so the common cases are readable:
+The `key` field accepts either a named alias or a raw evdev keycode as a string. Any key that exists in `/usr/include/linux/input-event-codes.h` works — the named list below is just so the common cases are readable:
 
 - **Modifiers:** `leftmeta rightmeta leftctrl rightctrl leftalt rightalt leftshift rightshift`
 - **Lock keys:** `capslock scrolllock numlock`
 - **Navigation + utility:** `home end pageup pagedown insert menu printscreen pause`
 - **Function keys:** `f1`..`f24`
 - **Apple aliases:** `rightcmd leftcmd rightoption leftoption` (map to `rightmeta` etc.)
-- **Anything else:** pass the raw evdev code as digits, e.g. `--key 70` for scroll lock, `--key 194` for F21. `utter set-key` detects whichever key you press and picks the nicer form automatically.
+- **Anything else:** pass the raw evdev code as digits (as a quoted string in TOML), e.g. `key = "70"` for scroll lock, `key = "194"` for F24. `utter set-key` detects whichever key you press and picks the nicer form automatically.
 
-Save, then `systemctl --user restart utter-watcher`. For from-source installs, the `ExecStart` binary path is `%h/.cargo/bin/utter` instead of `/usr/bin/utter`.
+Save, then `systemctl --user restart utter-watcher`.
 
 ## Architecture
 

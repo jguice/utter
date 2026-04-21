@@ -96,15 +96,6 @@ about discoverability and auto-updates:
 
 ## Configuration
 
-- **Config file** (`~/.config/utter/config.toml`) to replace the
-  remaining `UTTER_*` env vars (cleanup, notify) plus the watcher key
-  (currently written as a systemd drop-in by `utter set-key`).
-  Migration path: on first run, if `config.toml` doesn't exist, read
-  any `UTTER_*` env vars that *are* set and persist them; env vars
-  still override the file (standard UNIX precedence). Ship the service
-  units without `Environment=UTTER_*` lines in the same release — new
-  installs start clean, existing installs keep working via the
-  override ordering.
 - **Re-introduce paste-method selection IF a real app breaks
   Shift+Insert.** The current default (Shift+Insert, primary
   selection) covers every terminal + GTK/Qt input we've tested. The
