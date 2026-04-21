@@ -14,5 +14,12 @@ jobs:
     steps:
       - uses: googleapis/release-please-action@v4
         with:
+          # Fine-scoped PAT so the tag push isn't made by GITHUB_TOKEN —
+          # GitHub suppresses workflow triggers from GITHUB_TOKEN-made
+          # events (anti-infinite-loop), which would otherwise stop
+          # release.yml from firing on the tag and we'd have to
+          # workflow_dispatch the build by hand. See the v0.2.0 release
+          # for the motivating incident.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
