@@ -8,8 +8,9 @@ Type=simple
 ExecStart=/usr/bin/utter daemon
 Restart=on-failure
 RestartSec=2
-# Always put transcribed text on the clipboard. UTTER_AUTOTYPE=1 also pastes
-# it into the focused window via ydotool.
+# Write transcriptions to the primary selection and auto-paste via
+# Shift+Insert. UTTER_AUTOTYPE=0 suppresses the keystroke (user middle-
+# clicks or Shift+Inserts manually); the primary selection is still set.
 Environment=UTTER_AUTOTYPE=1
 Environment=YDOTOOL_SOCKET=/tmp/.ydotool_socket
 Environment=RUST_LOG=info

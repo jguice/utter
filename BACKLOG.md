@@ -29,9 +29,10 @@ Deferred improvements. Not urgent, but worth capturing.
 
 ## Packaging
 
-v0.4.0 ships prebuilt `.deb` and `.rpm` (both arm64 and amd64) as
-GitHub release assets via nfpm + GitHub Actions. The remaining wins
-are about discoverability and auto-updates:
+v0.1.0 ships prebuilt `.deb` and `.rpm` (both arm64 and amd64) as
+GitHub release assets via nfpm + GitHub Actions, plus a one-liner
+installer (`scripts/install-release.sh`). The remaining wins are
+about discoverability and auto-updates:
 
 - **COPR repo (Fedora).** `sudo dnf copr enable jguice/utter &&
   sudo dnf install utter` adds auto-updates via `dnf`. The spec file
@@ -50,6 +51,18 @@ are about discoverability and auto-updates:
 
 ## Reliability
 
+- **Silence the `onnxruntime cpuid_info warning` on every CLI invocation.**
+  On Apple Silicon / Asahi, ONNX Runtime prints `Unknown CPU vendor.
+  cpuinfo_vendor value: 0` to stderr at shared-library load time — i.e.
+  before `main()` runs, so it fires on every `utter --version`,
+  `utter start`, `utter stop`, etc. even though those subcommands don't
+  need the model at all. Cleanest fix: split the binary so only the
+  `daemon` subcommand links `transcribe-rs` / `ort`, and the short-lived
+  subcommands are a thin shim that talks to the daemon over the socket.
+  An intermediate fix: switch `ort` to its `load-dynamic` feature
+  (dlopen on first use) — the warning then only appears when the daemon
+  actually loads the model. Needs a PR against transcribe-rs (or a
+  feature flag) since it pins ort's features itself.
 - **Hotplug support in the watcher.** Currently enumerates
   `/dev/input/event*` once at startup. If you plug in a new keyboard
   later, the watcher won't pick it up without a restart. Subscribe to
@@ -62,7 +75,7 @@ are about discoverability and auto-updates:
 
 ## Model / quality
 
-- **Local-LLM cleanup (tier 2).** First pass shipped in v0.3.0 — a
+- **Local-LLM cleanup (tier 2).** Tier 1 (regex) ships today — a
   token-scan drops fillers (uh/um/er/ah/erm/hmm), collapses 3+
   same-word repetitions, and folds short-token stutters into the full
   word that follows ("wh wh wh what" → "what"). Handles the obvious
@@ -83,10 +96,24 @@ are about discoverability and auto-updates:
 
 ## Configuration
 
-- **Config file** (`~/.config/utter/config.toml`) to replace
-  the growing list of `UTTER_*` env vars. Watcher key, paste
-  method, notify preferences, model path.
+- **Config file** (`~/.config/utter/config.toml`) to replace the
+  remaining `UTTER_*` env vars (cleanup, notify) plus the watcher key
+  (currently written as a systemd drop-in by `utter set-key`).
+  Migration path: on first run, if `config.toml` doesn't exist, read
+  any `UTTER_*` env vars that *are* set and persist them; env vars
+  still override the file (standard UNIX precedence). Ship the service
+  units without `Environment=UTTER_*` lines in the same release — new
+  installs start clean, existing installs keep working via the
+  override ordering.
+- **Re-introduce paste-method selection IF a real app breaks
+  Shift+Insert.** The current default (Shift+Insert, primary
+  selection) covers every terminal + GTK/Qt input we've tested. The
+  `ctrl-v` / `ctrl-shift-v` branches were removed because they were
+  speculative — no app in our test set needed them. If a user reports
+  a specific app where Shift+Insert fails, add a per-app or
+  config-file override **with that app documented as the motivation**.
 - **Per-app paste method.** Different apps want different keystrokes
   (Claude Code wants Shift+Insert, Konsole wants Ctrl+Shift+V, most
   GUIs want Ctrl+V). Look up the focused window class via KWin
-  D-Bus / wlroots toplevel-management and dispatch accordingly.
+  D-Bus / wlroots toplevel-management and dispatch accordingly. Only
+  worth building if the previous item turns up real-world breakage.

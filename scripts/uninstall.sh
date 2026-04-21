@@ -109,6 +109,20 @@ if $PACKAGED; then
     dnf)     sudo dnf remove -y utter ;;
     apt-get) sudo apt-get remove -y utter ;;
   esac
+
+  # Package preremove tries to `systemctl --user stop` from the sudo context,
+  # which often can't reach the user session — the binary stays running after
+  # the unit file is deleted. Reap any orphans now.
+  orphan_pids=$(pgrep -u "$UID" -x utter 2>/dev/null || true)
+  if [[ -n "$orphan_pids" ]]; then
+    step "Killing orphan utter processes"
+    echo "    $orphan_pids"
+    kill $orphan_pids 2>/dev/null || true
+    sleep 1
+    # Anything still lingering?
+    orphan_pids=$(pgrep -u "$UID" -x utter 2>/dev/null || true)
+    [[ -n "$orphan_pids" ]] && kill -9 $orphan_pids 2>/dev/null || true
+  fi
 else
   step "Removing from-source utter files"
   rm -f "$HOME/.config/systemd/user/utter-daemon.service"
@@ -136,6 +150,14 @@ if [[ -d "$HOME/.config/systemd/user/utter-daemon.service.d" ]] || \
 fi
 
 systemctl --user daemon-reload 2>/dev/null || true
+# Clear "not-found inactive dead" entries left in the systemd user graph after
+# unit files are removed. Cosmetic — they'd clear on next login — but tidier.
+systemctl --user reset-failed 2>/dev/null || true
+
+# Remove stale sockets so a subsequent install starts clean.
+if [[ -n "${XDG_RUNTIME_DIR-}" ]]; then
+  rm -f "$XDG_RUNTIME_DIR/utter.sock"
+fi
 
 # --- model -------------------------------------------------------------------
 

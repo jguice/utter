@@ -25,13 +25,13 @@ cargo test --release            # runs the cleanup_transcription unit tests
 
 # Redeploy a local build over a running install:
 systemctl --user stop utter-watcher utter-daemon
-cp target/release/utter ~/.cargo/bin/       # or /usr/bin/ if package-installed
+cp --remove-destination target/release/utter ~/.cargo/bin/       # or sudo cp --remove-destination ... /usr/bin/ if package-installed
 systemctl --user start utter-daemon
 sleep 1                                        # daemon needs to bind the socket before the watcher starts
 systemctl --user start utter-watcher
 ```
 
-The daemon holds `~/.cargo/bin/utter` open while running — the `cp` fails with "Text file busy" if you don't stop it first.
+**Use `cp --remove-destination`, not plain `cp`.** `systemctl stop` returns as soon as SIGTERM is sent, but the kernel's exec mapping for the binary lingers briefly — plain `cp` then fails with `Text file busy` (`ETXTBSY`). `--remove-destination` unlinks the old file first and writes a new inode, which the kernel always allows regardless of whether the old inode is still mapped. If the shell continues past the failure (it will unless `set -e`), the subsequent `start` commands revive the *old* binary and the redeploy silently fails.
 
 ## Conventions
 

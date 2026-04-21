@@ -4,7 +4,13 @@ Local, no-cloud push-to-talk dictation for Linux. Hold a key, speak, release —
 
 Uses [NVIDIA Parakeet-TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (INT8 ONNX) for speech recognition, runs entirely offline, ~50× faster than real-time on a modern laptop CPU (measured ~150 ms for a 4-second utterance on an M2 Max).
 
-Built because existing dictation tools (Whispering, OpenWhispr, etc.) don't ship aarch64 Linux binaries, and when we tried building them from source we couldn't get working push-to-talk on Wayland — `keyd` and Tauri's global-shortcut plugin only fire on key-down, so true hold-to-talk (record on press, stop on release) wasn't possible. utter solves that by reading evdev directly, so it sees real key press *and* release events from the kernel, and pasting via `ydotool` so it also works under KDE where the `zwp_virtual_keyboard_v1` protocol is blocked.
+**What utter does:**
+
+- **True hold-to-talk.** Press the key, speak, release — the transcription appears. Key press *and* release are both read directly from the kernel via evdev, so the interaction feels immediate and doesn't depend on the compositor cooperating.
+- **Fully local.** No cloud, no API keys, no telemetry, no server process. The Parakeet model runs entirely on your device.
+- **Fast.** ~150 ms to transcribe 4 seconds of audio on a modern CPU — roughly 50× faster than real-time.
+- **Compositor-agnostic.** Paste goes through ydotool's `uinput` layer, so text lands in the focused window regardless of whether you're on KDE, GNOME, Sway, or any other Wayland desktop.
+- **Cross-architecture.** Prebuilt `.deb` and `.rpm` packages for both `aarch64` (Apple Silicon / Snapdragon / Ampere / Pi) and `x86_64`.
 
 ## Requirements
 
@@ -25,7 +31,7 @@ English-only — Parakeet is English-only. For multilingual, swap in Whisper via
 curl -fsSL https://raw.githubusercontent.com/jguice/utter/main/scripts/install-release.sh | bash
 ```
 
-Detects your distro + arch, downloads the matching `.rpm` or `.deb` from the latest GitHub release, installs via `dnf`/`apt`, fetches the Parakeet model into your XDG data dir, and starts the services. Run as your regular user (the script invokes `sudo` internally); takes 2–5 minutes over a decent connection.
+Detects your distro + arch, downloads the matching `.rpm` or `.deb` from the latest GitHub release, installs via `dnf`/`apt`, fetches the Parakeet model into your XDG data dir, and starts the services. Run as your regular user (the script invokes `sudo` internally); takes 2–5 minutes over a decent connection. Nothing else to do afterward — hold the key and speak.
 
 Supported out of the box: **Fedora** (incl. Asahi Remix), **RHEL** / **CentOS** / **Rocky** / **Alma** / **Nobara**, **Debian**, **Ubuntu** (incl. Pop, Mint, KDE Neon). Both `x86_64` and `aarch64`.
 
@@ -57,7 +63,7 @@ sudo apt install ./utter_*.deb
 
 The package pulls in its runtime deps (`ydotool`, `alsa-utils`, `wl-clipboard`, `libnotify`), drops a udev rule for keyboard access via `uaccess` (no `usermod` needed), registers systemd user services, and configures the ydotool socket.
 
-After install, download the model and start the services (one time):
+Unlike the one-liner above, the manual path doesn't download the model or start the services — do those yourself now:
 
 ```bash
 /usr/share/utter/download-model.sh
@@ -91,17 +97,23 @@ If any of those fail, jump to [Troubleshooting](#troubleshooting).
 
 Hold the push-to-talk key, speak, release. The transcription pastes into whichever field has focus.
 
-- **Default key:** Right Cmd on Apple keyboards, Right Super on others (`rightmeta` in kernel-event terms).
-- **Output:** text is copied to both the clipboard and the primary selection, then auto-pasted via Shift+Insert.
+- **Default key:** Right Cmd on Apple keyboards, Right Super on others (`rightmeta` in kernel-event terms). To change it, run `utter set-key` and press the key you'd rather use.
+- **Visual cue:** while you hold the key, your desktop's standard **microphone-in-use icon** lights up in the tray / status bar. That's the intentional "utter is listening" indicator — no custom overlay.
+- **Output:** text is written to the primary selection and auto-pasted via Shift+Insert into the focused window. The regular clipboard is deliberately left untouched so whatever you last copied is preserved.
 
 ## Configuration
 
-All configuration is via systemd service environment variables. To change any of them, run `systemctl --user edit utter-daemon` (or `utter-watcher`) and add an `[Service]` block with the overrides.
+utter runs as two systemd user services, each handling different concerns:
+
+- **`utter-daemon`** — loads the model, records audio, transcribes, pastes. Owns all the output-side environment variables in the table below.
+- **`utter-watcher`** — watches `/dev/input` for key events. Its only knob is which key triggers recording (`--key <name>` in its `ExecStart`); see [Change the push-to-talk key](#change-the-push-to-talk-key).
+
+To change any of the env vars below, run `systemctl --user edit utter-daemon` and add an `[Service]` block with the overrides.
 
 | Env var                  | Values                                         | Default          | Purpose                                                                 |
 |--------------------------|------------------------------------------------|------------------|-------------------------------------------------------------------------|
-| `UTTER_AUTOTYPE`      | `0` / `1`                                      | `1`              | When 0, only copies to clipboard (Ctrl+V to paste manually).            |
-| `UTTER_PASTE_METHOD`  | `shift-insert`, `ctrl-v`, `ctrl-shift-v`, `type` | `shift-insert` | Which keystroke to send after copying. `type` = character-at-a-time.    |
+| `UTTER_AUTOTYPE`      | `0` / `1`                                      | `1`              | When 0, writes the transcription to the primary selection but doesn't synthesize a paste keystroke — middle-click or Shift+Insert manually. |
+| `UTTER_CLIPBOARD`     | `0` / `1`                                      | `0`              | When 1, also writes the transcription to the regular clipboard (so it shows up in clipboard-manager history). Default leaves the regular clipboard untouched. |
 | `UTTER_CLEANUP`       | `0` / `1`                                      | `1`              | Drop fillers (uh/um/er/ah/erm/hmm), collapse stutters (`wh wh what`→`what`, `I I I think`→`I think`). Set 0 for raw Parakeet output. |
 | `UTTER_NOTIFY`        | `0` / `1`                                      | `0`              | When 1, fires a short `notify-send` toast on recording start / error.   |
 | `YDOTOOL_SOCKET`         | path                                           | `/tmp/.ydotool_socket` | Socket path for the ydotool daemon (only change if you relocated it). |
@@ -109,7 +121,25 @@ All configuration is via systemd service environment variables. To change any of
 
 ### Change the push-to-talk key
 
-Override the service unit (this works for both packaged and from-source installs and survives upgrades):
+Easiest: let utter detect the key for you.
+
+```bash
+utter set-key
+```
+
+Press and hold the key you want, then release. utter reports what it detected (e.g. `Detected: rightmeta (code 126)`), confirms the press **and** release both fired cleanly (so you know hold-to-talk will actually work on that key), and writes the override to `~/.config/systemd/user/utter-watcher.service.d/override.conf`. Pass `--dry-run` to just detect without saving.
+
+That covers both "what evdev name does this key have?" and "can utter actually read this key's events on my system?" in one step — useful if you remapped a key in your keyboard firmware (QMK, VIA, Karabiner-on-macOS-sibling-tool) or via a desktop utility, and you want to confirm it shows up as something usable.
+
+### Recording indicator
+
+While you're holding the key, your desktop's standard **microphone-in-use icon** (the small mic that appears in KDE's system tray, GNOME's top bar, etc.) is the intentional visual cue that utter is listening. When you release the key, recording stops and the icon disappears. utter doesn't ship a custom overlay widget on purpose — the system indicator is already there, already correct, and doesn't draw anything ugly over your screen.
+
+For a noisier feedback mode (a toast on start / errors), set `UTTER_NOTIFY=1` (see the table above).
+
+### Manual override (if you'd rather)
+
+`utter set-key` is a wrapper around editing the systemd unit. To do it by hand:
 
 ```bash
 systemctl --user edit utter-watcher
@@ -123,16 +153,16 @@ ExecStart=
 ExecStart=/usr/bin/utter watch --key capslock
 ```
 
-Replace `capslock` with any of:
+The `--key` argument accepts either a named alias or a raw evdev keycode (as digits). Any key that exists in `/usr/include/linux/input-event-codes.h` works — the named list below is just so the common cases are readable:
 
-```
-leftmeta rightmeta leftctrl rightctrl leftalt rightalt leftshift rightshift
-capslock f1..f20
-```
+- **Modifiers:** `leftmeta rightmeta leftctrl rightctrl leftalt rightalt leftshift rightshift`
+- **Lock keys:** `capslock scrolllock numlock`
+- **Navigation + utility:** `home end pageup pagedown insert menu printscreen pause`
+- **Function keys:** `f1`..`f24`
+- **Apple aliases:** `rightcmd leftcmd rightoption leftoption` (map to `rightmeta` etc.)
+- **Anything else:** pass the raw evdev code as digits, e.g. `--key 70` for scroll lock, `--key 194` for F21. `utter set-key` detects whichever key you press and picks the nicer form automatically.
 
-Apple-friendly aliases also work: `rightcmd`, `leftcmd`, `rightoption`, `leftoption`.
-
-For from-source installs the binary path is `%h/.cargo/bin/utter` instead of `/usr/bin/utter`. Save and exit; the watcher restarts automatically.
+Save, then `systemctl --user restart utter-watcher`. For from-source installs, the `ExecStart` binary path is `%h/.cargo/bin/utter` instead of `/usr/bin/utter`.
 
 ## Architecture
 
@@ -143,21 +173,21 @@ evdev ──► key event (press/release)
                                            │
                                            ▼
                                ┌─── utter daemon ───┐
-                               │ ┌──────┐  ┌────────────┐ │
-                               │ │ Pkr  │  │  arecord   │ │
-                               │ │ ONNX │  │  subproc   │ │
-                               │ └──────┘  └────────────┘ │
+                               │ ┌──────────┐  ┌──────────┐ │
+                               │ │ Parakeet │  │ arecord  │ │
+                               │ │   ONNX   │  │ subproc  │ │
+                               │ └──────────┘  └──────────┘ │
                                └─────────────┬─────────────┘
                                              │
                                              ▼
-                                     wl-copy (clipboard + primary)
-                                     ydotool key (paste keystroke)
+                                     wl-copy --primary (primary selection)
+                                     ydotool key (Shift+Insert)
                                      ─► focused window
 ```
 
 Two systemd user services:
 
-- **`utter-daemon`** — loads the model once (~630 ms on M2 Max), opens a Unix socket at `$XDG_RUNTIME_DIR/utter.sock`, accepts `start` / `stop` / `toggle` / `quit`. `start` forks `arecord` writing to `/tmp/utter-*.wav`. `stop` SIGINTs arecord, hands the WAV to Parakeet, and runs the output through clipboard + paste keystroke.
+- **`utter-daemon`** — loads the model once (~630 ms on M2 Max), opens a Unix socket at `$XDG_RUNTIME_DIR/utter.sock`, accepts `start` / `stop` / `toggle` / `quit`. `start` forks `arecord` writing to `/tmp/utter-*.wav`. `stop` SIGINTs arecord, hands the WAV to Parakeet, writes the output to the primary selection, and synthesizes Shift+Insert via ydotool.
 - **`utter-watcher`** — async evdev loop. Enumerates keyboards at startup, watches for the configured key on each, sends `start` on press and `stop` on release to the daemon. Ignores autorepeat (value=2).
 
 Plus one system service for `ydotoold` (the only privileged component — needs `/dev/uinput`).
@@ -180,11 +210,10 @@ ls -l /dev/input/event* | head
 **"no audio captured" error.**
 Your mic isn't producing samples. Test with `arecord -d 3 /tmp/x.wav && aplay /tmp/x.wav`. If that fails, check `wpctl status` (default source is right and volume is non-zero) and `journalctl --user | grep spa.alsa`.
 
-**Auto-paste is slow / characters appear one-by-one.**
-Your configured paste method failed (the focused app didn't accept it) and fell back to `ydotool type`. Try a different paste method via `UTTER_PASTE_METHOD` — some apps want `ctrl-v`, terminals want `ctrl-shift-v`, Claude Code and most others want `shift-insert`.
+**Paste goes to the wrong place / nothing pastes.**
+Shift+Insert pastes from the primary selection — which any mouse text-selection overwrites. If you highlighted something between releasing the key and the paste firing, the paste may use *that* text instead of your transcription. Release the PTT key in the window you want the text to land in and don't touch the mouse until it pastes.
 
-**Text pastes something else entirely (stale text).**
-Usually means only one of the two selections (clipboard / primary) is being written. The installed version writes both; if you're on an older build, pull and reinstall.
+If the cursor blinks but no text appears, check `journalctl --user -u utter-daemon -n 50` for `paste failed` or `wl-copy failed` warnings — those indicate ydotool or the compositor rejected something.
 
 ## Uninstall
 
