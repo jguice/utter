@@ -60,9 +60,7 @@ Probably worth converting Linux to cpal too as a follow-up; unifies the codepath
 
 ### 5. Notifications
 
-**Linux today:** `notify-send` subprocess (libnotify).
-
-**macOS:** `osascript -e 'display notification "..." with title "utter"'` is the zero-dependency path. Or native `UNUserNotificationCenter` via objc2 — nicer but adds a bind for a feature that's already opt-in via `show_notifications = true`. Go with osascript first; upgrade later if it feels janky.
+**Decided against.** Both Linux and macOS surface a system "microphone in use" indicator (notification-center mic / menu-bar mic) while utter records, which is the only feedback the user actually needs during the hot path. An additional toast on start/error added latency (especially on macOS via osascript → Notification Center) and was redundant with the OS indicator. The `show_notifications` config field and the `notify()` abstraction were removed.
 
 ### 6. Service management
 

@@ -1,19 +1,33 @@
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
+
+#[cfg(target_os = "linux")]
+use std::process::Stdio;
+#[cfg(target_os = "linux")]
+use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "linux")]
+use tokio::process::{Child, Command};
 
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
 
 mod config;
 use config::Config;
+
+#[cfg(target_os = "macos")]
+mod macos;
+
+#[cfg(target_os = "macos")]
+mod macos_ui;
+
+#[cfg(target_os = "macos")]
+mod macos_onboarding;
 
 #[derive(Parser)]
 #[command(
@@ -23,7 +37,7 @@ use config::Config;
 )]
 struct Cli {
     #[command(subcommand)]
-    cmd: Cmd,
+    cmd: Option<Cmd>,
 }
 
 #[derive(Subcommand)]
@@ -71,17 +85,24 @@ enum Cmd {
     },
 }
 
+#[cfg(target_os = "linux")]
 fn socket_path() -> Result<PathBuf> {
     let runtime = std::env::var("XDG_RUNTIME_DIR")
         .context("XDG_RUNTIME_DIR not set (need an active systemd user session)")?;
     Ok(PathBuf::from(runtime).join("utter.sock"))
 }
 
+#[cfg(target_os = "macos")]
+fn socket_path() -> Result<PathBuf> {
+    macos::socket_path()
+}
+
 fn default_model_dir() -> Result<PathBuf> {
-    let data = dirs::data_dir().ok_or_else(|| anyhow!("no XDG data dir"))?;
+    let data = dirs::data_dir().ok_or_else(|| anyhow!("no data dir"))?;
     Ok(data.join("utter/models/parakeet-tdt-0.6b-v3-int8"))
 }
 
+#[cfg(target_os = "linux")]
 fn fresh_wav_path() -> PathBuf {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -90,22 +111,131 @@ fn fresh_wav_path() -> PathBuf {
     std::env::temp_dir().join(format!("utter-{ts}.wav"))
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let cli = Cli::parse();
+
+    // On macOS, combined mode (no subcommand, used by `open utter.app`)
+    // runs the tokio runtime on a worker thread so NSApplication can own
+    // the main thread for the menu bar item. All other paths use a
+    // standard tokio runtime on the calling thread.
+    #[cfg(target_os = "macos")]
+    if cli.cmd.is_none() {
+        return run_combined_with_menu_bar();
+    }
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    rt.block_on(dispatch(cli))
+}
+
+async fn dispatch(cli: Cli) -> Result<()> {
     match cli.cmd {
-        Cmd::Daemon { model } => run_daemon(model).await,
-        Cmd::Start => send_command("start").await,
-        Cmd::Stop => send_command("stop").await,
-        Cmd::Toggle => send_command("toggle").await,
-        Cmd::Quit => send_command("quit").await,
-        Cmd::SocketPath => {
+        None => run_combined().await,
+        Some(Cmd::Daemon { model }) => run_daemon(model).await,
+        Some(Cmd::Start) => send_command("start").await,
+        Some(Cmd::Stop) => send_command("stop").await,
+        Some(Cmd::Toggle) => send_command("toggle").await,
+        Some(Cmd::Quit) => send_command("quit").await,
+        Some(Cmd::SocketPath) => {
             println!("{}", socket_path()?.display());
             Ok(())
         }
-        Cmd::Watch { key } => run_watcher(key.as_deref()).await,
-        Cmd::SetKey { dry_run, timeout } => run_set_key(dry_run, timeout).await,
+        Some(Cmd::Watch { key }) => run_watcher(key.as_deref()).await,
+        Some(Cmd::SetKey { dry_run, timeout }) => run_set_key(dry_run, timeout).await,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_combined_with_menu_bar() -> Result<()> {
+    // Read the current PTT key + config path on the main thread before
+    // handing off to the runtime — the menu bar item is built once and
+    // the initial labels need to be populated before NSApplication::run
+    // takes over.
+    let config_path = Config::default_path()?;
+    let cfg = Config::load_or_migrate(&config_path, &config::utter_env_snapshot())?;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+
+    // The runtime thread waits on this channel before spawning the daemon.
+    // The main thread sends on it either immediately (all perms already
+    // granted) or after the user finishes onboarding.
+    let (start_tx, start_rx) = std::sync::mpsc::channel::<()>();
+
+    // Park the runtime on its own thread so it stays alive for the
+    // duration of NSApplication::run(). Dropping the runtime would stop
+    // the daemon mid-dictation.
+    std::thread::Builder::new()
+        .name("utter-runtime".into())
+        .spawn(move || {
+            if start_rx.recv().is_err() {
+                log::warn!("runtime thread: start signal dropped before send");
+                return;
+            }
+            rt.block_on(async {
+                if let Err(e) = run_combined().await {
+                    log::error!("combined: {e:#}");
+                }
+            });
+        })?;
+
+    // Owns the main thread forever. `Quit utter` from the menu sends
+    // `terminate:` to NSApp, which exits the process; the runtime thread
+    // is torn down by the OS, and the daemon socket gets cleaned up by
+    // the next process start (daemon unlinks stale sockets on bind).
+    macos_ui::run_status_bar_app(&cfg, &config_path, start_tx)
+}
+
+/// Default no-subcommand entry point: spin up the daemon and the watcher
+/// as two tokio tasks in a single process. Used by `utter.app` so the
+/// user double-clicks once and dictation is live. The daemon's Unix-socket
+/// contract is preserved — the watcher still talks to it via
+/// `send_command_quiet` — so nothing about the cross-process IPC layer
+/// changes.
+async fn run_combined() -> Result<()> {
+    let daemon = tokio::spawn(async {
+        if let Err(e) = run_daemon(None).await {
+            log::error!("daemon: {e:#}");
+        }
+    });
+
+    // Give the daemon a head-start so the watcher's first keypress (if it
+    // comes early) finds a bound socket. Model load on first run is 5-30s;
+    // subsequent runs are sub-second. The watcher survives a transient
+    // "daemon not running" either way — send_command_quiet just logs it —
+    // so this is belt-and-suspenders, not correctness.
+    wait_for_socket(std::time::Duration::from_secs(60)).await;
+
+    let watcher = tokio::spawn(async {
+        if let Err(e) = run_watcher(None).await {
+            log::error!("watcher: {e:#}");
+        }
+    });
+
+    let _ = tokio::join!(daemon, watcher);
+    Ok(())
+}
+
+/// Poll until the daemon's socket exists or the deadline passes. Cheap
+/// stat per iteration; the daemon creates the socket synchronously during
+/// startup, so as soon as it's bound we stop waiting.
+async fn wait_for_socket(timeout: std::time::Duration) {
+    let start = std::time::Instant::now();
+    let poll = std::time::Duration::from_millis(100);
+    loop {
+        if let Ok(path) = socket_path() {
+            if path.exists() {
+                return;
+            }
+        }
+        if start.elapsed() >= timeout {
+            log::warn!("daemon socket didn't appear within {timeout:?}; starting watcher anyway");
+            return;
+        }
+        tokio::time::sleep(poll).await;
     }
 }
 
@@ -126,9 +256,16 @@ async fn send_command(cmd: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 enum State {
     Idle,
     Recording { child: Child, wav_path: PathBuf },
+}
+
+#[cfg(target_os = "macos")]
+enum State {
+    Idle,
+    Recording { capture: macos::AudioCapture },
 }
 
 struct Daemon {
@@ -142,12 +279,11 @@ async fn run_daemon(model_override: Option<PathBuf>) -> Result<()> {
     let env = config::utter_env_snapshot();
     let cfg = Config::load_or_migrate(&config_path, &env)?;
     log::info!(
-        "config loaded from {} (auto_paste={}, write_clipboard={}, filter_filler_words={}, show_notifications={})",
+        "config loaded from {} (auto_paste={}, write_clipboard={}, filter_filler_words={})",
         config_path.display(),
         cfg.auto_paste,
         cfg.write_clipboard,
         cfg.filter_filler_words,
-        cfg.show_notifications,
     );
 
     let model_dir = model_override.map(Ok).unwrap_or_else(default_model_dir)?;
@@ -157,6 +293,7 @@ async fn run_daemon(model_override: Option<PathBuf>) -> Result<()> {
             model_dir.display()
         ));
     }
+
     log::info!("loading Parakeet from {}", model_dir.display());
     let load_start = Instant::now();
     let model = tokio::task::spawn_blocking({
@@ -257,68 +394,40 @@ async fn start_recording(daemon: &Daemon) -> Result<()> {
     if matches!(*state, State::Recording { .. }) {
         return Err(anyhow!("already recording"));
     }
-    let wav_path = fresh_wav_path();
-    log::info!("recording to {}", wav_path.display());
-    notify("\u{1f3a4} Recording…", "", 1500, daemon.config.show_notifications).await;
-    let child = Command::new("arecord")
-        .args(["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav"])
-        .arg(&wav_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("spawn arecord (is alsa-utils installed?)")?;
-    *state = State::Recording { child, wav_path };
+    #[cfg(target_os = "linux")]
+    {
+        let wav_path = fresh_wav_path();
+        log::info!("recording to {}", wav_path.display());
+        let child = Command::new("arecord")
+            .args(["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav"])
+            .arg(&wav_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("spawn arecord (is alsa-utils installed?)")?;
+        *state = State::Recording { child, wav_path };
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let capture = macos::start_audio().await.context("start cpal input stream")?;
+        *state = State::Recording { capture };
+    }
     Ok(())
 }
 
 async fn stop_and_transcribe(daemon: &Daemon) -> Result<String> {
-    let (mut child, wav_path) = {
+    let prev_state = {
         let mut state = daemon.state.lock().await;
-        match std::mem::replace(&mut *state, State::Idle) {
-            State::Recording { child, wav_path } => (child, wav_path),
-            State::Idle => return Err(anyhow!("not recording")),
-        }
+        std::mem::replace(&mut *state, State::Idle)
     };
 
-    if let Some(pid) = child.id() {
-        use nix::sys::signal::{kill, Signal};
-        use nix::unistd::Pid;
-        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGINT);
-    }
-    let _ = child.wait().await;
-
-    // Empty WAVs mean arecord opened the device but never got audio frames —
-    // usually a PipeWire/ALSA "Cannot allocate memory" error on the source.
-    // Check size before handing to hound so we give a useful error instead
-    // of "Failed to read enough bytes".
-    let wav_meta = tokio::fs::metadata(&wav_path).await.ok();
-    let wav_size = wav_meta.map(|m| m.len()).unwrap_or(0);
-    if wav_size <= 128 {
-        let _ = tokio::fs::remove_file(&wav_path).await;
-        notify(
-            "Utter: no audio",
-            "Hold the key longer, or check your mic",
-            3000,
-            daemon.config.show_notifications,
-        )
-        .await;
-        return Err(anyhow!(
-            "no audio captured ({wav_size}B WAV). Check your mic with \
-             `wpctl status` and `journalctl --user -n 30 | grep spa.alsa`. \
-             On Asahi, the built-in mic may fail with `set_hw_params: \
-             Cannot allocate memory` — plug in a USB or 3.5mm headset mic."
-        ));
-    }
-
-    let samples = tokio::task::spawn_blocking({
-        let p = wav_path.clone();
-        move || transcribe_rs::audio::read_wav_samples(&p)
-    })
-    .await??;
+    let samples = match obtain_samples(prev_state).await {
+        Ok(s) => s,
+        Err(e) => return Err(e),
+    };
 
     if samples.is_empty() {
-        let _ = tokio::fs::remove_file(&wav_path).await;
         return Err(anyhow!("no audio captured"));
     }
 
@@ -333,8 +442,6 @@ async fn stop_and_transcribe(daemon: &Daemon) -> Result<String> {
     })
     .await??;
     log::info!("transcribed in {:?}: {:?}", started.elapsed(), text);
-
-    let _ = tokio::fs::remove_file(&wav_path).await;
 
     let cleaned = if daemon.config.filter_filler_words {
         cleanup_transcription(text.trim())
@@ -353,6 +460,51 @@ async fn stop_and_transcribe(daemon: &Daemon) -> Result<String> {
         emit_text(&out, &daemon.config).await;
     }
     Ok(out)
+}
+
+#[cfg(target_os = "linux")]
+async fn obtain_samples(state: State) -> Result<Vec<f32>> {
+    let (mut child, wav_path) = match state {
+        State::Recording { child, wav_path } => (child, wav_path),
+        State::Idle => return Err(anyhow!("not recording")),
+    };
+    if let Some(pid) = child.id() {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::Pid;
+        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGINT);
+    }
+    let _ = child.wait().await;
+
+    // Empty WAVs mean arecord opened the device but never got audio frames —
+    // usually a PipeWire/ALSA "Cannot allocate memory" error on the source.
+    let wav_meta = tokio::fs::metadata(&wav_path).await.ok();
+    let wav_size = wav_meta.map(|m| m.len()).unwrap_or(0);
+    if wav_size <= 128 {
+        let _ = tokio::fs::remove_file(&wav_path).await;
+        return Err(anyhow!(
+            "no audio captured ({wav_size}B WAV). Check your mic with \
+             `wpctl status` and `journalctl --user -n 30 | grep spa.alsa`. \
+             On Asahi, the built-in mic may fail with `set_hw_params: \
+             Cannot allocate memory` — plug in a USB or 3.5mm headset mic."
+        ));
+    }
+
+    let samples = tokio::task::spawn_blocking({
+        let p = wav_path.clone();
+        move || transcribe_rs::audio::read_wav_samples(&p)
+    })
+    .await??;
+
+    let _ = tokio::fs::remove_file(&wav_path).await;
+    Ok(samples)
+}
+
+#[cfg(target_os = "macos")]
+async fn obtain_samples(state: State) -> Result<Vec<f32>> {
+    match state {
+        State::Recording { capture } => macos::stop_audio(capture).await,
+        State::Idle => Err(anyhow!("not recording")),
+    }
 }
 
 /// Lightweight post-processing of Parakeet output.
@@ -438,6 +590,7 @@ fn cleanup_transcription(text: &str) -> String {
     joined.trim().to_string()
 }
 
+#[cfg(target_os = "linux")]
 async fn emit_text(text: &str, cfg: &Config) {
     let t0 = Instant::now();
     log::info!(
@@ -452,12 +605,6 @@ async fn emit_text(text: &str, cfg: &Config) {
     }
     log::info!("emit: wl_copy returned at +{:?}", t0.elapsed());
 
-    // Poll the primary selection until it matches our text (or bail after
-    // a budget). Tells us whether the compositor has accepted our offer
-    // before we fire the paste keystroke. Each iteration spawns a
-    // wl-paste subprocess — cheap (<5ms on KWin) relative to the real
-    // paste failure mode (cursor-blinks-no-paste), and every attempt is
-    // logged so we can see what's actually happening.
     if cfg.auto_paste {
         let matched = verify_primary(text.trim_end(), t0).await;
         if !matched {
@@ -472,6 +619,17 @@ async fn emit_text(text: &str, cfg: &Config) {
     }
 }
 
+#[cfg(target_os = "macos")]
+async fn emit_text(text: &str, cfg: &Config) {
+    let t0 = Instant::now();
+    log::info!("emit: start (len={}, auto_paste={})", text.len(), cfg.auto_paste);
+    if let Err(e) = macos::emit_text(text, cfg).await {
+        log::warn!("emit: {e:#}");
+    }
+    log::info!("emit: returned at +{:?}", t0.elapsed());
+}
+
+#[cfg(target_os = "linux")]
 async fn verify_primary(expected: &str, t0: Instant) -> bool {
     // Budget: up to 300ms total, polling every 10ms. Real compositor
     // latency observed so far is in the <50ms range; the high bound is
@@ -512,6 +670,7 @@ async fn verify_primary(expected: &str, t0: Instant) -> bool {
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn read_primary() -> Result<String> {
     let output = Command::new("wl-paste")
         .arg("--primary")
@@ -527,6 +686,7 @@ async fn read_primary() -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Selection {
     Primary,
@@ -536,6 +696,7 @@ enum Selection {
 /// Which wl-copy targets to write. `also_clipboard = false` (the default)
 /// writes only the primary selection and leaves the regular clipboard
 /// untouched.
+#[cfg(target_os = "linux")]
 fn selections_to_write(also_clipboard: bool) -> &'static [Selection] {
     if also_clipboard {
         &[Selection::Primary, Selection::Clipboard]
@@ -544,6 +705,7 @@ fn selections_to_write(also_clipboard: bool) -> &'static [Selection] {
     }
 }
 
+#[cfg(target_os = "linux")]
 async fn wl_copy(text: &str, also_clipboard: bool) -> Result<()> {
     for selection in selections_to_write(also_clipboard) {
         let mut cmd = Command::new("wl-copy");
@@ -564,6 +726,7 @@ async fn wl_copy(text: &str, also_clipboard: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 async fn ydotool_keys(codes: &[&str]) -> Result<()> {
     // Keep ydotool's documented 12ms default between key events. With 0,
     // modifier chords (Shift+Insert, Ctrl+V, Ctrl+Shift+V) raced: on a
@@ -583,28 +746,12 @@ async fn ydotool_keys(codes: &[&str]) -> Result<()> {
     Ok(())
 }
 
-async fn notify(summary: &str, body: &str, expire_ms: u64, enabled: bool) {
-    if !enabled {
-        return;
-    }
-    let _ = Command::new("notify-send")
-        .args([
-            "--app-name=Utter",
-            "--icon=audio-input-microphone",
-            "--expire-time",
-            &expire_ms.to_string(),
-            summary,
-            body,
-        ])
-        .status()
-        .await;
-}
-
 /// Canonical short name for an evdev keycode. Used for pretty display in
 /// the config file and CLI output. Anything not listed here still works —
 /// it just gets stored as the raw numeric keycode instead. The set below
 /// deliberately covers keys that are plausible push-to-talk choices (they
 /// don't fire during normal typing); it's not a completeness statement.
+#[cfg(target_os = "linux")]
 fn canonical_name_for(code: evdev::KeyCode) -> Option<&'static str> {
     Some(match code {
         // Modifiers
@@ -659,6 +806,7 @@ fn canonical_name_for(code: evdev::KeyCode) -> Option<&'static str> {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn parse_key_name(name: &str) -> Result<evdev::KeyCode> {
     let n = name.to_ascii_lowercase();
     let n = n.strip_prefix("key_").unwrap_or(&n);
@@ -728,6 +876,12 @@ fn parse_key_name(name: &str) -> Result<evdev::KeyCode> {
     ))
 }
 
+#[cfg(target_os = "macos")]
+async fn run_watcher(key_arg: Option<&str>) -> Result<()> {
+    macos::run_watcher(key_arg).await
+}
+
+#[cfg(target_os = "linux")]
 async fn run_watcher(key_arg: Option<&str>) -> Result<()> {
     // --key flag wins; otherwise fall back to config.key.
     let cfg = Config::load_or_migrate(&Config::default_path()?, &config::utter_env_snapshot())?;
@@ -769,6 +923,7 @@ async fn run_watcher(key_arg: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 async fn watch_device(device: evdev::Device, target: evdev::KeyCode) -> Result<()> {
     let mut stream = device.into_event_stream()?;
     loop {
@@ -799,7 +954,7 @@ async fn watch_device(device: evdev::Device, target: evdev::KeyCode) -> Result<(
 
 // send_command variant that doesn't print the server reply — the watcher fires
 // many times per second and we don't want stdout spam.
-async fn send_command_quiet(cmd: &str) -> Result<()> {
+pub(crate) async fn send_command_quiet(cmd: &str) -> Result<()> {
     let path = socket_path()?;
     let mut stream = UnixStream::connect(&path)
         .await
@@ -818,6 +973,12 @@ async fn send_command_quiet(cmd: &str) -> Result<()> {
 //      AND release events landed, so the user knows hold-to-talk will work.
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "macos")]
+async fn run_set_key(dry_run: bool, timeout_secs: u64) -> Result<()> {
+    macos::run_set_key(dry_run, timeout_secs).await
+}
+
+#[cfg(target_os = "linux")]
 async fn run_set_key(dry_run: bool, timeout_secs: u64) -> Result<()> {
     // Stop the running watcher so it doesn't intercept the test key-press.
     // Remember if it was running so we can restore state on error / dry-run.
@@ -876,6 +1037,7 @@ async fn run_set_key(dry_run: bool, timeout_secs: u64) -> Result<()> {
     result
 }
 
+#[cfg(target_os = "linux")]
 async fn pick_key_and_maybe_save(dry_run: bool, timeout_secs: u64) -> Result<()> {
     // Enumerate anything that looks like a keyboard. KEY_A is present on
     // every real keyboard and absent on mice/touchpads/joysticks, so it's
@@ -958,6 +1120,7 @@ async fn pick_key_and_maybe_save(dry_run: bool, timeout_secs: u64) -> Result<()>
 /// pre-config-file `utter-watcher.service.d/override.conf` if present —
 /// that file would otherwise shadow the new config-file key via
 /// systemd's `ExecStart=` override.
+#[cfg(target_os = "linux")]
 fn save_key_to_config(key_name: &str) -> Result<()> {
     let path = Config::default_path()?;
     let env = config::utter_env_snapshot();
@@ -967,6 +1130,7 @@ fn save_key_to_config(key_name: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn remove_stale_watcher_override() {
     let Some(config_dir) = dirs::config_dir() else { return; };
     let override_path = config_dir.join("systemd/user/utter-watcher.service.d/override.conf");
@@ -984,6 +1148,7 @@ fn remove_stale_watcher_override() {
     log::info!("removed stale systemd drop-in at {}", override_path.display());
 }
 
+#[cfg(target_os = "linux")]
 async fn watch_first_press_release(
     device: evdev::Device,
     tx: tokio::sync::mpsc::Sender<evdev::KeyCode>,
@@ -1009,6 +1174,7 @@ async fn watch_first_press_release(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn watcher_is_active() -> bool {
     std::process::Command::new("systemctl")
         .args(["--user", "is-active", "--quiet", "utter-watcher.service"])
@@ -1017,6 +1183,7 @@ fn watcher_is_active() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
 fn run_systemctl_user(args: &[&str]) -> std::io::Result<std::process::ExitStatus> {
     std::process::Command::new("systemctl")
         .arg("--user")
@@ -1024,7 +1191,7 @@ fn run_systemctl_user(args: &[&str]) -> std::io::Result<std::process::ExitStatus
         .status()
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{
         canonical_name_for, cleanup_transcription, parse_key_name, selections_to_write,

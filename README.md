@@ -1,21 +1,33 @@
+<img src="utter-icon.png" alt="utter" width="128" align="right">
+
 # utter
 
-Local, no-cloud push-to-talk dictation for Linux. Hold a key, speak, release — the transcription appears in whatever text field is focused.
+[![CI](https://github.com/jguice/utter/actions/workflows/ci.yml/badge.svg)](https://github.com/jguice/utter/actions/workflows/ci.yml)
+[![Release](https://github.com/jguice/utter/actions/workflows/release.yml/badge.svg)](https://github.com/jguice/utter/actions/workflows/release.yml)
+
+Local, no-cloud push-to-talk dictation for **Linux and macOS**. Hold a key, speak, release — the transcription appears in whatever text field is focused.
 
 Uses [NVIDIA Parakeet-TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3) (INT8 ONNX) for speech recognition, runs entirely offline, ~50× faster than real-time on a modern laptop CPU (measured ~150 ms for a 4-second utterance on an M2 Max).
 
 **What utter does:**
 
-- **True hold-to-talk.** Press the key, speak, release — the transcription appears. Key press *and* release are both read directly from the kernel via evdev, so the interaction feels immediate and doesn't depend on the compositor cooperating.
+- **True hold-to-talk.** Press the key, speak, release — the transcription appears. Key press *and* release are read directly from the OS event stream (evdev on Linux, CGEventTap on macOS), so the interaction feels immediate regardless of which UI framework owns the focused window.
 - **Fully local.** No cloud, no API keys, no telemetry, no server process. The Parakeet model runs entirely on your device.
 - **Fast.** ~150 ms to transcribe 4 seconds of audio on a modern CPU — roughly 50× faster than real-time.
-- **Compositor-agnostic.** Paste goes through ydotool's `uinput` layer, so text lands in the focused window regardless of whether you're on KDE, GNOME, Sway, or any other Wayland desktop.
-- **Cross-architecture.** Prebuilt `.deb` and `.rpm` packages for both `aarch64` (Apple Silicon / Snapdragon / Ampere / Pi) and `x86_64`.
+- **Per-platform native integration.** Linux: paste through ydotool's `uinput` layer, works on any Wayland compositor. macOS: menu-bar `LSUIElement` app, signed with Developer ID, first-run onboarding window walks you through the three TCC prompts (Microphone, Input Monitoring, Accessibility).
+- **Cross-architecture.** Prebuilt `.deb` / `.rpm` for `aarch64` and `x86_64` Linux; signed + notarized `.dmg` for Apple Silicon macOS.
 
 ## Requirements
 
-- Linux with Wayland and systemd user sessions (tested on Fedora Asahi Remix, KDE Plasma 6)
-- A working microphone (`wpctl status` should show it; try `arecord -d 2 /tmp/test.wav && aplay /tmp/test.wav`)
+**Linux** (tested on Fedora Asahi Remix + KDE Plasma 6)
+- Wayland and systemd user sessions
+- A working microphone (`wpctl status` should show it; `arecord -d 2 /tmp/test.wav && aplay /tmp/test.wav` to verify)
+
+**macOS** (tested on Apple Silicon, macOS 26)
+- macOS 13 or later
+- A working microphone (System Settings → Sound → Input)
+
+**Both**
 - ~1 GB RAM for the loaded model, ~650 MB disk for the model files
 - For the from-source path only: a Rust toolchain (`rustup` / `cargo`)
 
@@ -25,7 +37,7 @@ English-only — Parakeet is English-only. For multilingual, swap in Whisper via
 
 ## Install
 
-### One command (recommended)
+### Linux — one command (recommended)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jguice/utter/main/scripts/install-release.sh | bash
@@ -43,7 +55,27 @@ less install-release.sh
 bash install-release.sh
 ```
 
-### Manual package install
+### macOS
+
+Download `utter-VERSION-macos-arm64.dmg` from [the latest GitHub release](https://github.com/jguice/utter/releases/latest) (Apple Silicon only for now). The DMG is signed with a Developer ID certificate and notarized by Apple, so it opens without Gatekeeper warnings.
+
+Open the DMG, drag `utter.app` to `/Applications` (or wherever you keep apps), then double-click to launch. On **first run** utter shows an onboarding window for the three macOS permissions it needs:
+
+1. **Microphone** → click Grant → native prompt → Allow
+2. **Input Monitoring** → click Grant → "Keystroke Receiving" prompt → Open System Settings → toggle utter ON → Quit & Reopen (macOS relaunches utter)
+3. **Accessibility** → click Grant → Open System Settings → toggle utter ON → Quit & Reopen
+
+After all three grants land, the menu bar icon appears and push-to-talk is live. The default key is **Right Option (⌥)**; change it from the menu bar's *Change PTT Key…* item.
+
+You still need the Parakeet model (~650 MB, one-time):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jguice/utter/main/scripts/download-model.sh | bash
+```
+
+The model drops into `~/Library/Application Support/utter/models/`.
+
+### Linux — manual package install
 
 Grab the asset that matches your system from [the latest GitHub release](https://github.com/jguice/utter/releases/latest):
 
@@ -108,10 +140,18 @@ utter runs as two systemd user services:
 - **`utter-daemon`** — loads the model, records audio, transcribes, emits text.
 - **`utter-watcher`** — watches `/dev/input` for the PTT key and tells the daemon when to start and stop.
 
-Both read their user-facing settings from **`~/.config/utter/config.toml`**. The file is created on first daemon start (using defaults + any `UTTER_*` env vars you had set at the time) and re-read on every daemon restart. Edit it by hand or via `utter set-key` for the PTT key specifically. Restart the relevant service(s) to pick up changes:
+Both read their user-facing settings from a `config.toml`:
+
+- Linux: `~/.config/utter/config.toml`
+- macOS: `~/Library/Application Support/utter/config.toml`
+
+The file is created on first daemon start (using defaults + any `UTTER_*` env vars you had set at the time) and re-read on every daemon restart. Edit it by hand, via `utter set-key` for the PTT key, or (on macOS) via the menu-bar toggles for the bool settings. Restart to pick up changes:
 
 ```bash
+# Linux
 systemctl --user restart utter-daemon utter-watcher
+
+# macOS: Cmd+Q from the menu bar icon, then reopen utter.app
 ```
 
 Default contents:
@@ -132,14 +172,11 @@ write_clipboard = false
 # Drop fillers (uh, um, er, ah, erm, hmm) and collapse stuttered
 # repetitions (`I I I think` → `I think`).
 filter_filler_words = true
-
-# Fire notify-send on recording start / errors.
-show_notifications = false
 ```
 
 ### Env var overrides
 
-Every field above is overridable at runtime via an environment variable with the same name, upper-cased and prefixed `UTTER_` — e.g. `UTTER_AUTO_PASTE=0` wins over `auto_paste = true` in the file. Useful for one-off runs (`UTTER_SHOW_NOTIFICATIONS=1 utter daemon`) or systemd-drop-in tweaks without editing the config file:
+Every field above is overridable at runtime via an environment variable with the same name, upper-cased and prefixed `UTTER_` — e.g. `UTTER_AUTO_PASTE=0` wins over `auto_paste = true` in the file. Useful for one-off runs (`UTTER_AUTO_PASTE=0 utter daemon`) or systemd-drop-in tweaks without editing the config file:
 
 | Env var                     | Values    | Overrides field       | Purpose                                                                 |
 |-----------------------------|-----------|-----------------------|-------------------------------------------------------------------------|
@@ -147,7 +184,6 @@ Every field above is overridable at runtime via an environment variable with the
 | `UTTER_AUTO_PASTE`          | `0` / `1` | `auto_paste`          | Synthesize Shift+Insert paste.                                          |
 | `UTTER_WRITE_CLIPBOARD`     | `0` / `1` | `write_clipboard`     | Also write the regular clipboard (not just primary selection).          |
 | `UTTER_FILTER_FILLER_WORDS` | `0` / `1` | `filter_filler_words` | Drop fillers (uh/um/er/ah/erm/hmm), collapse stutters.                  |
-| `UTTER_SHOW_NOTIFICATIONS`  | `0` / `1` | `show_notifications`  | `notify-send` toast on recording start / error.                         |
 
 These stay env-only (third-party tools, not utter's config):
 
@@ -172,9 +208,7 @@ That covers both "what evdev name does this key have?" and "can utter actually r
 
 ### Recording indicator
 
-While you're holding the key, your desktop's standard **microphone-in-use icon** (the small mic that appears in KDE's system tray, GNOME's top bar, etc.) is the intentional visual cue that utter is listening. When you release the key, recording stops and the icon disappears. utter doesn't ship a custom overlay widget on purpose — the system indicator is already there, already correct, and doesn't draw anything ugly over your screen.
-
-For a noisier feedback mode (a toast on start / errors), set `show_notifications = true` in the config file or `UTTER_SHOW_NOTIFICATIONS=1` in the environment.
+While you're holding the key, your desktop's standard **microphone-in-use icon** (the small mic that appears in KDE's system tray, GNOME's top bar, the macOS menu bar, etc.) is the intentional visual cue that utter is listening. When you release the key, recording stops and the icon disappears. utter doesn't ship a custom overlay widget on purpose — the system indicator is already there, already correct, and doesn't draw anything ugly over your screen.
 
 ### Manual override (if you'd rather)
 
@@ -197,7 +231,10 @@ The `key` field accepts either a named alias or a raw evdev keycode as a string.
 
 Save, then `systemctl --user restart utter-watcher`.
 
-## Architecture
+## Architecture (Linux)
+
+> macOS runs as a single-process `LSUIElement` menu-bar app (no systemd, no ydotool). Audio via cpal + CoreAudio; PTT via CGEventTap; paste via NSPasteboard + synthesized Cmd+V through CGEventPost; permissions flow through a first-run onboarding window that drives the native TCC prompts. Everything below describes the Linux multi-service architecture.
+
 
 ```
                ┌─── utter watch ────┐
@@ -250,7 +287,11 @@ If the cursor blinks but no text appears, check `journalctl --user -u utter-daem
 
 ## Uninstall
 
-### One command
+### macOS
+
+Drag `utter.app` to the Trash. The Parakeet model lives at `~/Library/Application Support/utter/` — `rm -rf ~/Library/Application\ Support/utter/` clears it plus the config file. Revoke the TCC grants in System Settings → Privacy & Security if you want a fully clean state.
+
+### Linux — one command
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jguice/utter/main/scripts/uninstall.sh | bash
