@@ -10,7 +10,18 @@ set -euo pipefail
 MODEL_REPO="istupakov/parakeet-tdt-0.6b-v3-onnx"
 MODEL_REV="8f23f0c03c8761650bdb5b40aaf3e40d2c15f1ce"
 
-DEST="${XDG_DATA_HOME:-$HOME/.local/share}/utter/models/parakeet-tdt-0.6b-v3-int8"
+# The Rust side (default_model_dir() in src/main.rs) derives the model
+# directory from dirs::data_dir() + "utter/models/parakeet-tdt-0.6b-v3-int8".
+# On macOS that's ~/Library/Application Support/...; on Linux it's
+# $XDG_DATA_HOME/... or ~/.local/share/... . Keep in lockstep with that.
+case "$OSTYPE" in
+    darwin*)
+        DEST="$HOME/Library/Application Support/utter/models/parakeet-tdt-0.6b-v3-int8"
+        ;;
+    *)
+        DEST="${XDG_DATA_HOME:-$HOME/.local/share}/utter/models/parakeet-tdt-0.6b-v3-int8"
+        ;;
+esac
 HF="https://huggingface.co/${MODEL_REPO}/resolve/${MODEL_REV}"
 
 mkdir -p "$DEST"

@@ -2,3 +2,4 @@
 /models
 *.wav
 .env
+.DS_Store

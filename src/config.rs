@@ -24,8 +24,6 @@ pub struct Config {
     /// repetitions (`I I I think` → `I think`, `wh wh wh what` → `what`)
     /// before emitting text.
     pub filter_filler_words: bool,
-    /// Fire a `notify-send` toast on recording start and errors.
-    pub show_notifications: bool,
 }
 
 impl Default for Config {
@@ -35,7 +33,6 @@ impl Default for Config {
             auto_paste: true,
             write_clipboard: false,
             filter_filler_words: true,
-            show_notifications: false,
         }
     }
 }
@@ -43,9 +40,11 @@ impl Default for Config {
 impl Config {
     /// Deserialize from a TOML string, falling back to defaults for missing
     /// fields. Returns an error if the TOML is syntactically invalid or
-    /// contains unknown fields.
+    /// contains unknown fields. Lines for known-removed legacy fields are
+    /// stripped first so users who upgrade in place don't have to delete
+    /// their existing config.
     pub fn from_toml(text: &str) -> Result<Self> {
-        toml::from_str(text).context("parse config TOML")
+        toml::from_str(&strip_legacy_fields(text)).context("parse config TOML")
     }
 
     /// Serialize to a TOML string with a header comment and per-field
@@ -55,8 +54,7 @@ impl Config {
         format!(
             "# utter configuration. Managed by `utter set-key` and edited by hand.\n\
              # Env vars (UTTER_KEY, UTTER_AUTO_PASTE, UTTER_WRITE_CLIPBOARD,\n\
-             # UTTER_FILTER_FILLER_WORDS, UTTER_SHOW_NOTIFICATIONS) override any\n\
-             # value set here.\n\
+             # UTTER_FILTER_FILLER_WORDS) override any value set here.\n\
              \n\
              # PTT key: named alias (rightmeta, capslock, f13, ...) or numeric evdev\n\
              # keycode as a string.\n\
@@ -71,15 +69,11 @@ impl Config {
              \n\
              # Drop fillers (uh, um, er, ah, erm, hmm) and collapse stuttered\n\
              # repetitions (`I I I think` → `I think`).\n\
-             filter_filler_words = {filter_filler_words}\n\
-             \n\
-             # Fire notify-send on recording start / errors.\n\
-             show_notifications = {show_notifications}\n",
+             filter_filler_words = {filter_filler_words}\n",
             key = self.key,
             auto_paste = self.auto_paste,
             write_clipboard = self.write_clipboard,
             filter_filler_words = self.filter_filler_words,
-            show_notifications = self.show_notifications,
         )
     }
 
@@ -100,10 +94,6 @@ impl Config {
         if let Some(v) = env.get("UTTER_FILTER_FILLER_WORDS") {
             self.filter_filler_words =
                 parse_bool_env("UTTER_FILTER_FILLER_WORDS", v).unwrap_or(self.filter_filler_words);
-        }
-        if let Some(v) = env.get("UTTER_SHOW_NOTIFICATIONS") {
-            self.show_notifications = parse_bool_env("UTTER_SHOW_NOTIFICATIONS", v)
-                .unwrap_or(self.show_notifications);
         }
         self
     }
@@ -136,6 +126,31 @@ impl Config {
         self
     }
 
+    // Consumed only by the macOS menu-bar toggles today; Linux UI
+    // would use it once built. Keep it available.
+    #[allow(dead_code)]
+    pub fn with_auto_paste(mut self, v: bool) -> Self {
+        self.auto_paste = v;
+        self
+    }
+
+    // Used by Linux's wl_copy path indirectly via the field, and by tests.
+    // The macOS UI temporarily hides the toggle (no snapshot-and-restore
+    // around Cmd+V yet); kept available for the imminent follow-up PR.
+    #[allow(dead_code)]
+    pub fn with_write_clipboard(mut self, v: bool) -> Self {
+        self.write_clipboard = v;
+        self
+    }
+
+    // Consumed only by the macOS menu-bar toggles today; Linux UI
+    // would use it once built. Keep it available.
+    #[allow(dead_code)]
+    pub fn with_filter_filler_words(mut self, v: bool) -> Self {
+        self.filter_filler_words = v;
+        self
+    }
+
     /// Load from `path` if it exists, else synthesize from env vars
     /// (first-run migration) and write it. Env vars are then layered on
     /// top so precedence holds: env > file > default.
@@ -157,6 +172,24 @@ impl Config {
         };
         Ok(base.with_env_overrides(env))
     }
+}
+
+/// Drop top-level lines for fields that existed in earlier versions but
+/// have since been removed. Without this, `deny_unknown_fields` rejects
+/// the file and the app refuses to start until the user manually edits it.
+/// Add to this list whenever a field is removed; remove from the list
+/// once enough time has passed that no live configs reference it.
+fn strip_legacy_fields(text: &str) -> String {
+    const REMOVED_FIELDS: &[&str] = &["show_notifications"];
+    text.lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !REMOVED_FIELDS
+                .iter()
+                .any(|f| trimmed.starts_with(f) && trimmed[f.len()..].trim_start().starts_with('='))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn parse_bool_env(name: &str, value: &str) -> Option<bool> {
@@ -194,7 +227,6 @@ mod tests {
         assert!(c.auto_paste, "auto_paste on by default");
         assert!(!c.write_clipboard, "write_clipboard off by default — don't pollute");
         assert!(c.filter_filler_words, "filter_filler_words on by default");
-        assert!(!c.show_notifications, "show_notifications off by default");
     }
 
     #[test]
@@ -204,7 +236,6 @@ mod tests {
             auto_paste: false,
             write_clipboard: true,
             filter_filler_words: false,
-            show_notifications: true,
         };
         let text = original.to_toml();
         let parsed = Config::from_toml(&text).unwrap();
@@ -218,6 +249,16 @@ mod tests {
         assert_eq!(c.key, "f13");
         assert!(c.auto_paste, "other fields default");
         assert!(!c.write_clipboard);
+    }
+
+    #[test]
+    fn from_toml_silently_drops_legacy_show_notifications() {
+        // Existing configs in the wild still have this line; loading must
+        // succeed and the field is just discarded.
+        let text = "key = \"f13\"\nshow_notifications = true\nauto_paste = false\n";
+        let c = Config::from_toml(text).unwrap();
+        assert_eq!(c.key, "f13");
+        assert!(!c.auto_paste);
     }
 
     #[test]
@@ -242,14 +283,12 @@ mod tests {
             ("UTTER_AUTO_PASTE", "0"),
             ("UTTER_WRITE_CLIPBOARD", "1"),
             ("UTTER_FILTER_FILLER_WORDS", "0"),
-            ("UTTER_SHOW_NOTIFICATIONS", "1"),
         ]);
         let c = base.with_env_overrides(&e);
         assert_eq!(c.key, "f13");
         assert!(!c.auto_paste);
         assert!(c.write_clipboard);
         assert!(!c.filter_filler_words);
-        assert!(c.show_notifications);
     }
 
     #[test]
@@ -259,7 +298,6 @@ mod tests {
             auto_paste: false,
             write_clipboard: true,
             filter_filler_words: false,
-            show_notifications: true,
         };
         let c = base.clone().with_env_overrides(&env(&[("PATH", "/usr/bin")]));
         assert_eq!(c, base);
@@ -330,7 +368,6 @@ mod tests {
             auto_paste: false,
             write_clipboard: true,
             filter_filler_words: false,
-            show_notifications: true,
             key: "rightmeta".to_string(),
         };
         let updated = c.clone().with_key("f13");
@@ -339,7 +376,32 @@ mod tests {
         assert_eq!(updated.auto_paste, c.auto_paste);
         assert_eq!(updated.write_clipboard, c.write_clipboard);
         assert_eq!(updated.filter_filler_words, c.filter_filler_words);
-        assert_eq!(updated.show_notifications, c.show_notifications);
+    }
+
+    #[test]
+    fn with_flag_methods_replace_only_their_field() {
+        let base = Config::default();
+
+        let flipped = base
+            .clone()
+            .with_auto_paste(false)
+            .with_write_clipboard(true)
+            .with_filter_filler_words(false);
+
+        assert!(!flipped.auto_paste);
+        assert!(flipped.write_clipboard);
+        assert!(!flipped.filter_filler_words);
+        // Unrelated fields preserved.
+        assert_eq!(flipped.key, base.key);
+    }
+
+    #[test]
+    fn with_flag_methods_chain_with_with_key() {
+        let c = Config::default()
+            .with_key("f13")
+            .with_auto_paste(false);
+        assert_eq!(c.key, "f13");
+        assert!(!c.auto_paste);
     }
 
     #[test]
