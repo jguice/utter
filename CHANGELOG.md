@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.3.0](https://github.com/jguice/utter/compare/v0.2.0...v0.3.0) (2026-04-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* **macos:** show_notifications config field and UTTER_SHOW_NOTIFICATIONS env var are removed. Existing configs with that field still load (the line is silently dropped); the env var is now a no-op.
+
+### Features
+
+* **config:** move user settings from env vars to ~/.config/utter/config.toml ([ef63bb7](https://github.com/jguice/utter/commit/ef63bb729150be72a1afe59ab7b31f1dd29788f8))
+* **macos:** first-run onboarding + menu bar UI + Developer ID signing + CI DMG ([1bb8ef4](https://github.com/jguice/utter/commit/1bb8ef480e68d61c2a5ef2756f772a588e25a0a5))
+
+
+### Refactoring
+
+* **config:** rename fields for clarity ([bb1c4c9](https://github.com/jguice/utter/commit/bb1c4c97c7be26615805cd4582f168c7b91377ff))
+
+
+### Documentation
+
+* add macOS port design notes ([323791e](https://github.com/jguice/utter/commit/323791e2fa4678a77d1d19ecaffff14bbaaf677b))
+
 ## [0.2.0](https://github.com/jguice/utter/compare/v0.1.0...v0.2.0) (2026-04-21)
 
 
