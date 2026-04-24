@@ -47,7 +47,7 @@ about discoverability and auto-updates:
 - **AUR package (Arch).**
 - **Flatpak.** Probably painful because of /dev/uinput and /dev/input
   access requirements — Flatpak sandboxes heavily restrict both.
-- **Bundle model as a GitHub release asset.** ~640 MB fits under the
+- **Bundle model as a GitHub release asset.** ~650 MB fits under the
   2 GB-per-asset limit. Acts as a mirror if the HF repo ever disappears.
 - **In-app update check.** Utter daemon could compare its running
   version to the latest GitHub release and `notify-send` when a new

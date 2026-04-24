@@ -15,7 +15,7 @@ Edit it by hand, via `utter set-key` for the PTT key, or (on macOS) via the menu
 # Linux
 systemctl --user restart utter-daemon utter-watcher
 
-# macOS: Cmd+Q from the menu bar icon, then reopen utter.app
+# macOS: pick "Quit utter" from the menu-bar icon, then reopen utter.app
 ```
 
 Default contents:
@@ -72,7 +72,7 @@ Precedence: **CLI flag > env var > config file > default.**
 
 On macOS, `rightmeta` / `rightcmd` → Right Cmd, `rightoption` / `rightalt` → Right Option, `capslock` → Caps Lock, function keys → F1..F24.
 
-After hand-editing the config, restart: `systemctl --user restart utter-watcher` (Linux) or Cmd+Q + relaunch (macOS).
+After hand-editing the config, restart: `systemctl --user restart utter-watcher` (Linux), or pick **Quit utter** from the menu-bar icon and relaunch the app (macOS).
 
 `utter set-key --dry-run` detects the key and reports the canonical name without writing the config — useful for figuring out how a remapped key (QMK / VIA / Karabiner) shows up on your system.
 

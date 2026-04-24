@@ -17,7 +17,7 @@ Local, no-cloud push-to-talk dictation for **macOS and Linux**. Hold a key, spea
 3. Launch `utter.app`. A first-run window walks you through three permission prompts (Microphone, Input Monitoring, Accessibility). The menu-bar icon appears once all three land.
 4. Hold **Right Cmd (⌘)**, speak, release. Text pastes into your focused window.
 
-**Change the PTT key:** open Terminal, run `/Applications/utter.app/Contents/MacOS/utter set-key`, press and hold the key you want, release. Cmd+Q the menu-bar icon and relaunch to apply.
+**Change the PTT key:** open Terminal, run `/Applications/utter.app/Contents/MacOS/utter set-key`, press and hold the key you want, release. Pick **Quit utter** from the menu-bar icon and relaunch the app to apply.
 
 ### Linux (Fedora, RHEL, Rocky, Debian, Ubuntu — `x86_64` / `aarch64`)
 
