@@ -242,6 +242,9 @@ jobs:
           xcrun stapler staple target/release/utter.app
           xcrun stapler validate target/release/utter.app
 
+      - name: Install create-dmg
+        run: brew install create-dmg
+
       - name: Create DMG
         env:
           RAW_VERSION: ${{ github.ref_name }}
@@ -252,14 +255,21 @@ jobs:
           VERSION="${TAG#v}"
           DMG_NAME="utter-${VERSION}-macos-arm64.dmg"
           mkdir -p dist
-          # Use a staging dir so the DMG layout is just the app (no stray files).
           STAGE="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$STAGE"
           mkdir -p "$STAGE"
           cp -R target/release/utter.app "$STAGE/"
-          hdiutil create -volname "utter" \
-            -srcfolder "$STAGE" \
-            -ov -format UDZO \
-            "dist/${DMG_NAME}"
+          create-dmg \
+            --volname "utter" \
+            --window-pos 200 120 \
+            --window-size 540 380 \
+            --icon-size 100 \
+            --icon "utter.app" 140 190 \
+            --app-drop-link 400 190 \
+            --hide-extension "utter.app" \
+            --no-internet-enable \
+            "dist/${DMG_NAME}" \
+            "$STAGE"
 
       - name: Sign + notarize + staple DMG
         run: |
