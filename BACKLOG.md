@@ -14,6 +14,13 @@ Deferred improvements. Not urgent, but worth capturing.
   KDE widget.
 - **Transcription history / undo.** Keep the last N transcriptions so
   the user can paste an earlier one without re-dictating.
+- **macOS menu-bar icon: active-recording state.** While the PTT key is
+  held, switch the menu-bar icon to a distinct variant (filled / colored
+  / animated) so the user has a visual "utter is listening" cue without
+  needing to check the system mic indicator. Set via
+  `NSStatusItem.button.image` in the CGEventTap's keyDown handler,
+  revert on keyUp. Template vs. non-template image choice affects how
+  macOS tints it in light/dark/tinted menu bars.
 
 ## Portability
 
