@@ -1,4 +1,4 @@
-<h1><img src="utter-icon.png" alt="" height="40"> &nbsp;utter</h1>
+<h1><img src="utter-icon.png" alt="" height="48" align="middle">&nbsp;&nbsp;utter</h1>
 
 [![CI](https://github.com/jguice/utter/actions/workflows/ci.yml/badge.svg)](https://github.com/jguice/utter/actions/workflows/ci.yml)
 [![Release](https://github.com/jguice/utter/actions/workflows/release.yml/badge.svg)](https://github.com/jguice/utter/actions/workflows/release.yml)
