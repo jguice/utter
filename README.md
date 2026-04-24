@@ -7,27 +7,19 @@ Local, no-cloud push-to-talk dictation for **macOS and Linux**. Hold a key, spea
 
 ## Quickstart
 
-### 1. Fetch the Parakeet model (both platforms, one-time)
-
-~650 MB. Drops into `~/Library/Application Support/utter/models/` on macOS, `~/.local/share/utter/models/` on Linux.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/jguice/utter/main/scripts/download-model.sh | bash
-```
-
-> Skip this if you use the Linux one-liner below — it fetches the model for you.
-
-### 2. Install utter
-
-#### macOS (Apple Silicon)
+### macOS (Apple Silicon)
 
 1. Download `utter-VERSION-macos-arm64.dmg` from the [latest release](https://github.com/jguice/utter/releases/latest). Open it, drag `utter.app` to `/Applications`.
-2. Launch `utter.app`. A first-run window walks you through three permission prompts (Microphone, Input Monitoring, Accessibility). The menu-bar icon appears once all three land.
-3. Hold **Right Cmd (⌘)**, speak, release. Text pastes into your focused window.
+2. Fetch the speech model (~650 MB, one-time):
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/jguice/utter/main/scripts/download-model.sh | bash
+   ```
+3. Launch `utter.app`. A first-run window walks you through three permission prompts (Microphone, Input Monitoring, Accessibility). The menu-bar icon appears once all three land.
+4. Hold **Right Cmd (⌘)**, speak, release. Text pastes into your focused window.
 
 **Change the PTT key:** open Terminal, run `/Applications/utter.app/Contents/MacOS/utter set-key`, press and hold the key you want, release. Cmd+Q the menu-bar icon and relaunch to apply.
 
-#### Linux (Fedora, RHEL, Rocky, Debian, Ubuntu — `x86_64` / `aarch64`)
+### Linux (Fedora, RHEL, Rocky, Debian, Ubuntu — `x86_64` / `aarch64`)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jguice/utter/main/scripts/install-release.sh | bash
