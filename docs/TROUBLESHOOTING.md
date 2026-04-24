@@ -22,3 +22,7 @@ Your mic isn't producing samples. Test with `arecord -d 3 /tmp/x.wav && aplay /t
 Shift+Insert pastes from the primary selection — which any mouse text-selection overwrites. If you highlighted something between releasing the key and the paste firing, the paste may use *that* text instead of your transcription. Release the PTT key in the window you want the text to land in and don't touch the mouse until it pastes.
 
 If the cursor blinks but no text appears, check `journalctl --user -u utter-daemon -n 50` for `paste failed` or `wl-copy failed` warnings — those indicate ydotool or the compositor rejected something.
+
+## App quirks (any OS)
+
+**Slack strips the trailing space on paste.** utter ends every dictation with a trailing space so consecutive dictations don't smash together. Slack's compose field is a rich-text editor that normalizes whitespace on paste and drops that space, so back-to-back dictations land as `Hello.World.` instead of `Hello. World.`. Add a space by hand between dictations; there's no Slack setting to turn the trim off.
