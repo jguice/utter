@@ -8,19 +8,16 @@ Deferred improvements. Not urgent, but worth capturing.
   utterances and degrades beyond ~5 min. Fire a `notify-send` warning
   when a recording crosses ~3 min, and hard-stop + warn at ~10 min
   (model accuracy drops, inference memory balloons).
-- **Visible recording indicator** (optional). Plasma shows a mic icon
-  in the tray while audio is captured, but a small OSD overlay (like
-  Wispr Flow's) would be nicer. Likely needs a small Qt/GTK app or a
-  KDE widget.
+- **Recording-state indicator** (optional). The system mic icon
+  (Plasma tray, GNOME top bar, macOS Control Center) already lights up
+  during capture, but a first-party cue would be nicer. On macOS:
+  switch the menu-bar `NSStatusItem.button.image` to a distinct
+  variant in the CGEventTap's keyDown handler, revert on keyUp
+  (template vs. non-template affects how macOS tints it in
+  light/dark/tinted menu bars). On Linux: a small OSD overlay
+  (Wispr-Flow-style) via a Qt/GTK app or a KDE widget.
 - **Transcription history / undo.** Keep the last N transcriptions so
   the user can paste an earlier one without re-dictating.
-- **macOS menu-bar icon: active-recording state.** While the PTT key is
-  held, switch the menu-bar icon to a distinct variant (filled / colored
-  / animated) so the user has a visual "utter is listening" cue without
-  needing to check the system mic indicator. Set via
-  `NSStatusItem.button.image` in the CGEventTap's keyDown handler,
-  revert on keyUp. Template vs. non-template image choice affects how
-  macOS tints it in light/dark/tinted menu bars.
 
 ## Portability
 
@@ -90,8 +87,6 @@ about discoverability and auto-updates:
 - **Graceful daemon shutdown.** On SIGTERM, finish any in-flight
   transcription before exiting. Right now a restart mid-transcription
   drops the audio.
-- **CI.** GitHub Actions using `ubuntu-24.04-arm` runners to verify
-  `cargo build` doesn't break on pushes.
 
 ## Model / quality
 

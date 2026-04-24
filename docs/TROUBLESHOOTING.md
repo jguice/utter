@@ -1,4 +1,6 @@
-# Troubleshooting
+# Troubleshooting (Linux)
+
+Everything below is Linux-specific. On macOS, check Console.app for messages tagged `utter` and open an issue if you hit something not covered by the [README quickstart's onboarding flow](../README.md#macos-apple-silicon).
 
 **Nothing pastes after I release the key.**
 ```bash

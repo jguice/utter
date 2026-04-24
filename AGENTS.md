@@ -1,6 +1,6 @@
 # AGENTS.md
 
-**Read [`README.md`](README.md) first.** It has everything an agent or human needs to install, configure, and troubleshoot utter — no duplicate content here. This file captures only the few things specific to running utter operations via an agent.
+**Read [`README.md`](README.md) first** for the quickstart, then [`docs/INSTALL.md`](docs/INSTALL.md), [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md), and [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) for details. This file captures only the few things specific to running utter operations via an agent.
 
 ## Agent-specific notes
 
@@ -18,6 +18,6 @@
 
 - **After editing any service, `systemctl --user daemon-reload` and then `restart` the affected unit.** Neither happens automatically.
 
-- **Don't guess env var names or values.** They're listed in README's Configuration table.
+- **Don't guess env var names or values.** They're listed in the tables in [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md).
 
 - **If a command requires `sudo`, tell the user to run it rather than trying to pipe a password.** Hook-based command execution typically can't forward a TTY for password prompts.
