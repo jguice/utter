@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.1](https://github.com/jguice/utter/compare/v0.3.0...v0.3.1) (2026-04-24)
+
+
+### Documentation
+
+* **backlog:** add macOS active-recording menu-bar icon state ([5a93db3](https://github.com/jguice/utter/commit/5a93db36947ac659b9548d3fab90b04d52298dd8))
+* de-duplicate across README/INSTALL/CONFIGURATION + fix stale refs ([25eb7d7](https://github.com/jguice/utter/commit/25eb7d70c8228075b60a42989624d36eaecbd475))
+* **readme:** hoist model fetch above macOS install as shared step 1 ([b984c7f](https://github.com/jguice/utter/commit/b984c7ff7182f4ddb0b0b2074d410a15e7c7bc76))
+* **readme:** revert model-fetch hoist; keep inside macOS section ([73bb8ee](https://github.com/jguice/utter/commit/73bb8eeefaa2243fb30f2bbbd8311b431d4b889b))
+* **readme:** use absmiddle + larger icon for better header alignment ([f2a87aa](https://github.com/jguice/utter/commit/f2a87aa5dbda736d39b0c5acdab51f450c2d3a99))
+* **readme:** vertically center icon with heading text ([fe206a7](https://github.com/jguice/utter/commit/fe206a7ca487cad14e55d4d8edf006427818bd21))
+* reword Cmd+Q + fix model size discrepancy ([b72eb84](https://github.com/jguice/utter/commit/b72eb845bc10dc1dadc203ccbcfd31d66bc56fff))
+* slim README and split long sections into docs/ ([60835e0](https://github.com/jguice/utter/commit/60835e0c1c4ea5ea13b93cfc78fca57a844ca6e0))
+* **troubleshooting:** note Slack trims trailing space on paste ([e1079c1](https://github.com/jguice/utter/commit/e1079c1eada5c6e25a30cea5d2f17d01dac33fc5))
+
 ## [0.3.0](https://github.com/jguice/utter/compare/v0.2.0...v0.3.0) (2026-04-24)
 
 
