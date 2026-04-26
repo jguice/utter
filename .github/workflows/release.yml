@@ -294,11 +294,10 @@ jobs:
   macos-intel-build:
     name: Build macOS x86_64 (Intel, signed + notarized DMG)
     needs: test
-    # macos-14-large is a native Intel (x86_64) runner. Mirrors the silicon job's
-    # macOS version so eventual deprecation migrations stay coupled. Native is slower
-    # than cross-compiling from arm64 (per actions/runner-images#12545) but avoids
-    # the unknowns of cross-compiling ONNX Runtime.
-    runs-on: macos-14-large
+    # macos-15-intel is the standard 4-core Intel runner — free + unlimited on
+    # public repos. (Don't use *-large: those are Team/Enterprise-only larger
+    # runners.) Native build avoids the unknowns of cross-compiling ONNX Runtime.
+    runs-on: macos-15-intel
     env:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
