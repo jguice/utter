@@ -1,53 +1,105 @@
-name: Release
+name: Prerelease Build
+
+# Builds a prerelease for the current branch and publishes it as a GitHub
+# pre-release with a per-branch tag (`prerelease-<sanitized-branch>`). Each run
+# replaces the prior prerelease for that branch in place — never more than one
+# prerelease per branch at a time, regardless of how many incremental commits
+# land. Pre-releases don't appear as "Latest" on the Releases page, so the
+# main release timeline stays clean.
+#
+# Version scheme (semver-compliant pre-release):
+#   <cargo-version>-<sanitized-branch>.<short-sha>
+# e.g. 0.3.0-feat-macos-universal-binary.abc1234
+#
+# Triggers:
+#   - PR opened / pushed to / reopened: auto-build the head commit
+#   - workflow_dispatch: for branches that don't have a PR yet
+#
+# Concurrency: in-flight builds for the same branch are cancelled by newer
+# pushes. Burst pushes only build the latest commit, not every intermediate.
+#
+# Fork PR caveat: GitHub doesn't expose secrets to PRs from forks, so a
+# fork PR's run will fail at the Apple signing step. This is by design.
 
 on:
-  push:
-    tags:
-      - 'v*'
+  pull_request:
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to build (e.g. v0.4.0)'
-        required: true
 
 permissions:
   contents: write
+
+concurrency:
+  group: prerelease-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
 
 env:
   NFPM_VERSION: 2.46.3
 
 jobs:
-  test:
-    name: test + clippy
-    runs-on: ubuntu-24.04-arm
+  version:
+    name: Compute prerelease version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      tag: ${{ steps.compute.outputs.tag }}
+      sha: ${{ steps.compute.outputs.sha }}
+      ref: ${{ steps.compute.outputs.ref }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system build deps
+      - name: Resolve head ref + sha
+        id: resolve_ref
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.head_ref }}
+          EVENT_SHA: ${{ github.sha }}
+          EVENT_REF: ${{ github.ref_name }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libssl-dev pkg-config clang cmake g++ curl
+          set -euo pipefail
+          # PR events: head.sha is the commit being tested; head_ref is the source branch.
+          # workflow_dispatch: github.sha + github.ref_name point at the dispatched branch's tip.
+          if [ -n "$HEAD_SHA" ]; then
+            REF="$HEAD_REF"
+            SHA="$HEAD_SHA"
+          else
+            REF="$EVENT_REF"
+            SHA="$EVENT_SHA"
+          fi
+          printf 'ref=%s\n' "$REF" >> "$GITHUB_OUTPUT"
+          printf 'sha=%s\n' "$SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Checkout (for Cargo.toml read)
+        uses: actions/checkout@v4
         with:
-          components: clippy
+          ref: ${{ steps.resolve_ref.outputs.sha }}
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ci
+      - name: Compute version + tag
+        id: compute
+        env:
+          REF: ${{ steps.resolve_ref.outputs.ref }}
+          SHA: ${{ steps.resolve_ref.outputs.sha }}
+        run: |
+          set -euo pipefail
+          CARGO_VERSION=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          # Sanitize branch name to match semver pre-release identifier syntax
+          # (`[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*`): lowercase, replace anything
+          # other than [a-z0-9.-] with `-`, collapse runs, trim edges.
+          SANITIZED=$(printf '%s' "$REF" \
+            | tr '[:upper:]' '[:lower:]' \
+            | tr -c 'a-z0-9.-' '-' \
+            | sed 's/-\{1,\}/-/g; s/^-//; s/-$//')
+          SHORT_SHA="${SHA:0:7}"
+          VERSION="${CARGO_VERSION}-${SANITIZED}.${SHORT_SHA}"
+          TAG="prerelease-${SANITIZED}"
+          printf 'version=%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
+          printf 'sha=%s\n' "$SHA" >> "$GITHUB_OUTPUT"
+          printf 'ref=%s\n' "$REF" >> "$GITHUB_OUTPUT"
+          echo "Prerelease version: $VERSION"
+          echo "Prerelease tag:     $TAG"
 
-      - name: cargo test
-        run: cargo test --locked
-
-      - name: cargo clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
-
-  build:
-    name: Build ${{ matrix.arch }}
-    needs: test
+  build-linux:
+    name: Build Linux ${{ matrix.arch }}
+    needs: version
     strategy:
       fail-fast: false
       matrix:
@@ -59,24 +111,11 @@ jobs:
             arch: arm64
             rust_target: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.runner }}
-
     steps:
-      - name: Resolve checkout ref
-        id: resolve_ref
-        env:
-          DISPATCH_TAG: ${{ inputs.tag }}
-          EVENT_REF: ${{ github.ref }}
-        run: |
-          if [ -n "$DISPATCH_TAG" ]; then
-            printf 'ref=%s\n' "$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
-          else
-            printf 'ref=%s\n' "$EVENT_REF" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.resolve_ref.outputs.ref }}
+          ref: ${{ needs.version.outputs.sha }}
 
       - name: Install system build deps
         run: |
@@ -92,7 +131,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-${{ matrix.arch }}
+          shared-key: prerelease-${{ matrix.arch }}
 
       - name: Build release binary
         env:
@@ -118,13 +157,9 @@ jobs:
       - name: Build .deb and .rpm
         working-directory: packaging
         env:
-          RAW_VERSION: ${{ github.ref_name }}
-          DISPATCH_TAG: ${{ inputs.tag }}
+          UTTER_VERSION: ${{ needs.version.outputs.version }}
           UTTER_ARCH: ${{ matrix.arch }}
         run: |
-          TAG="${DISPATCH_TAG:-$RAW_VERSION}"
-          # Strip leading 'v' so package version is 0.4.0, not v0.4.0.
-          UTTER_VERSION="${TAG#v}"
           export UTTER_VERSION UTTER_ARCH
           mkdir -p ../dist
           nfpm pkg --packager deb --target ../dist/
@@ -132,12 +167,9 @@ jobs:
 
       - name: Build plain binary tarball
         env:
-          RAW_VERSION: ${{ github.ref_name }}
-          DISPATCH_TAG: ${{ inputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
           UTTER_ARCH: ${{ matrix.arch }}
         run: |
-          TAG="${DISPATCH_TAG:-$RAW_VERSION}"
-          VERSION="${TAG#v}"
           STAGE="utter-${VERSION}-linux-${UTTER_ARCH}"
           mkdir -p "dist/${STAGE}"
           cp target/release/utter "dist/${STAGE}/"
@@ -150,13 +182,13 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.arch }}
+          name: prerelease-dist-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
 
-  macos-build:
+  build-macos-arm64:
     name: Build macOS arm64 (signed + notarized DMG)
-    needs: test
+    needs: version
     runs-on: macos-14
     env:
       APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -164,24 +196,11 @@ jobs:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       UTTER_SIGN_IDENTITY: "Developer ID Application: Josh Guice (YKQ46WD7SL)"
       RUST_TARGET: aarch64-apple-darwin
-
     steps:
-      - name: Resolve checkout ref
-        id: resolve_ref
-        env:
-          DISPATCH_TAG: ${{ inputs.tag }}
-          EVENT_REF: ${{ github.ref }}
-        run: |
-          if [ -n "$DISPATCH_TAG" ]; then
-            printf 'ref=%s\n' "$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
-          else
-            printf 'ref=%s\n' "$EVENT_REF" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.resolve_ref.outputs.ref }}
+          ref: ${{ needs.version.outputs.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -191,7 +210,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-macos-arm64
+          shared-key: prerelease-macos-arm64
 
       - name: Import Developer ID cert into temp keychain
         env:
@@ -209,14 +228,11 @@ jobs:
             -k "$KEYCHAIN_PATH" \
             -P "$CERT_PASS" \
             -T /usr/bin/codesign -T /usr/bin/security
-          # Put the temp keychain at the front of the search list so codesign finds it.
           security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
-          # Allow codesign to access the key without a GUI prompt.
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: \
             -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
           rm -f "$RUNNER_TEMP/cert.p12"
-          # Sanity check: identity visible.
           security find-identity -v -p codesigning "$KEYCHAIN_PATH"
 
       - name: Build release binary (arm64)
@@ -247,12 +263,9 @@ jobs:
 
       - name: Create DMG
         env:
-          RAW_VERSION: ${{ github.ref_name }}
-          DISPATCH_TAG: ${{ inputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          TAG="${DISPATCH_TAG:-$RAW_VERSION}"
-          VERSION="${TAG#v}"
           DMG_NAME="utter-${VERSION}-macos-arm64.dmg"
           mkdir -p dist
           STAGE="$RUNNER_TEMP/dmg-stage"
@@ -287,16 +300,13 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dist-macos-arm64
+          name: prerelease-dist-macos-arm64
           path: dist/utter-*-macos-arm64.dmg
           if-no-files-found: error
 
-  macos-intel-build:
+  build-macos-x86_64:
     name: Build macOS x86_64 (Intel, signed + notarized DMG)
-    needs: test
-    # macos-15-intel is the standard 4-core Intel runner — free + unlimited on
-    # public repos. (Don't use *-large: those are Team/Enterprise-only larger
-    # runners.) Native build avoids the unknowns of cross-compiling ONNX Runtime.
+    needs: version
     runs-on: macos-15-intel
     env:
       APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -304,29 +314,12 @@ jobs:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       UTTER_SIGN_IDENTITY: "Developer ID Application: Josh Guice (YKQ46WD7SL)"
       RUST_TARGET: x86_64-apple-darwin
-      # Pyke ort 2.0.0-rc.12 doesn't ship prebuilt ONNX Runtime for x86_64-apple-darwin
-      # (their prebuilts are arm64 + linux + windows). We build ONNX Runtime from source
-      # and point ort-sys at the result via ORT_LIB_PATH. The pin must match what pyke
-      # validates against in pykeio/ort .github/workflows/custom-static-link.yml.
       ONNXRUNTIME_VERSION: v1.24.2
-
     steps:
-      - name: Resolve checkout ref
-        id: resolve_ref
-        env:
-          DISPATCH_TAG: ${{ inputs.tag }}
-          EVENT_REF: ${{ github.ref }}
-        run: |
-          if [ -n "$DISPATCH_TAG" ]; then
-            printf 'ref=%s\n' "$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
-          else
-            printf 'ref=%s\n' "$EVENT_REF" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.resolve_ref.outputs.ref }}
+          ref: ${{ needs.version.outputs.sha }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -336,10 +329,8 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: release-macos-x86_64
+          shared-key: prerelease-macos-x86_64
 
-      # The from-source ONNX Runtime build is the slow step (~30 min cold). Cache it
-      # by version so the heavy work only runs when ONNXRUNTIME_VERSION changes.
       - name: Cache ONNX Runtime build
         id: cache-onnxruntime
         uses: actions/cache@v4
@@ -356,9 +347,6 @@ jobs:
           git clone https://github.com/microsoft/onnxruntime --recursive \
             --branch "$VERSION" --single-branch --depth 1
           cd onnxruntime
-          # --skip_tests trims ~30% off the build by not compiling test executables
-          # (we only need the .a libs for ort-sys's static linking). Native build
-          # on this Intel runner — no cross-compile flags needed.
           ./build.sh --update --build --config Release --parallel \
             --compile_no_warning_as_error --skip_submodule_sync --skip_tests
 
@@ -415,12 +403,9 @@ jobs:
 
       - name: Create DMG
         env:
-          RAW_VERSION: ${{ github.ref_name }}
-          DISPATCH_TAG: ${{ inputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           set -euo pipefail
-          TAG="${DISPATCH_TAG:-$RAW_VERSION}"
-          VERSION="${TAG#v}"
           DMG_NAME="utter-${VERSION}-macos-x86_64.dmg"
           mkdir -p dist
           STAGE="$RUNNER_TEMP/dmg-stage"
@@ -455,46 +440,65 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: dist-macos-x86_64
+          name: prerelease-dist-macos-x86_64
           path: dist/utter-*-macos-x86_64.dmg
           if-no-files-found: error
 
-  release:
-    name: Publish release
-    needs: [build, macos-build, macos-intel-build]
+  publish:
+    name: Publish prerelease
+    needs: [version, build-linux, build-macos-arm64, build-macos-x86_64]
     runs-on: ubuntu-24.04
     steps:
+      - name: Checkout (for tag operations)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          fetch-depth: 0
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: prerelease-dist-*
           merge-multiple: true
 
       - name: List artifacts
         run: ls -la dist/
 
-      - name: Resolve release tag
-        id: resolve_tag
+      # Replace any prior prerelease for this branch in place: delete the
+      # existing release + tag (if present), then publish a fresh one. This
+      # keeps exactly one prerelease per branch on the Releases page.
+      - name: Delete prior prerelease + tag (if any)
         env:
-          DISPATCH_TAG: ${{ inputs.tag }}
-          EVENT_TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.version.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ -n "$DISPATCH_TAG" ]; then
-            printf 'tag=%s\n' "$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Deleting existing prerelease $TAG"
+            gh release delete "$TAG" --yes --cleanup-tag
           else
-            printf 'tag=%s\n' "$EVENT_TAG" >> "$GITHUB_OUTPUT"
+            echo "No existing prerelease for $TAG"
           fi
 
-      - name: Attach artifacts to GitHub release
+      - name: Publish prerelease
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.resolve_tag.outputs.tag }}
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ needs.version.outputs.sha }}
+          name: "Prerelease: ${{ needs.version.outputs.ref }} @ ${{ needs.version.outputs.version }}"
+          body: |
+            Prerelease build for branch `${{ needs.version.outputs.ref }}` at commit ${{ needs.version.outputs.sha }}.
+
+            **Version:** `${{ needs.version.outputs.version }}`
+
+            This pre-release is replaced in place on every push to the branch.
+            It is automatically deleted when the branch's PR is closed.
+          prerelease: true
+          make_latest: 'false'
           files: |
             dist/utter_*.deb
             dist/utter-*.rpm
             dist/utter-*.tar.gz
             dist/utter-*-macos-*.dmg
-          # release-please creates the Release with CHANGELOG-derived notes
-          # before this workflow runs; we only need to attach artifacts.
-          generate_release_notes: false
           fail_on_unmatched_files: true

@@ -19,6 +19,10 @@ Local, no-cloud push-to-talk dictation for **macOS and Linux**. Hold a key, spea
 
 **Change the PTT key:** open Terminal, run `/Applications/utter.app/Contents/MacOS/utter set-key`, press and hold the key you want, release. Pick **Quit utter** from the menu-bar icon and relaunch the app to apply.
 
+### macOS (Intel)
+
+Same flow as Apple Silicon, but download `utter-VERSION-macos-x86_64.dmg` instead of the arm64 build. The Intel build is functionally identical — same on-device transcription, same permission flow, same PTT behavior. Requires macOS 13 or later.
+
 ### Linux (Fedora, RHEL, Rocky, Debian, Ubuntu — `x86_64` / `aarch64`)
 
 ```bash
