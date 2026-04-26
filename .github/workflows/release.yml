@@ -291,9 +291,178 @@ jobs:
           path: dist/utter-*-macos-arm64.dmg
           if-no-files-found: error
 
+  macos-intel-build:
+    name: Build macOS x86_64 (Intel, signed + notarized DMG)
+    needs: test
+    # macos-14-large is a native Intel (x86_64) runner. Mirrors the silicon job's
+    # macOS version so eventual deprecation migrations stay coupled. Native is slower
+    # than cross-compiling from arm64 (per actions/runner-images#12545) but avoids
+    # the unknowns of cross-compiling ONNX Runtime.
+    runs-on: macos-14-large
+    env:
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      UTTER_SIGN_IDENTITY: "Developer ID Application: Josh Guice (YKQ46WD7SL)"
+      RUST_TARGET: x86_64-apple-darwin
+      # Pyke ort 2.0.0-rc.12 doesn't ship prebuilt ONNX Runtime for x86_64-apple-darwin
+      # (their prebuilts are arm64 + linux + windows). We build ONNX Runtime from source
+      # and point ort-sys at the result via ORT_LIB_PATH. The pin must match what pyke
+      # validates against in pykeio/ort .github/workflows/custom-static-link.yml.
+      ONNXRUNTIME_VERSION: v1.24.2
+
+    steps:
+      - name: Resolve checkout ref
+        id: resolve_ref
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+          EVENT_REF: ${{ github.ref }}
+        run: |
+          if [ -n "$DISPATCH_TAG" ]; then
+            printf 'ref=%s\n' "$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
+          else
+            printf 'ref=%s\n' "$EVENT_REF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.resolve_ref.outputs.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.RUST_TARGET }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-macos-x86_64
+
+      # The from-source ONNX Runtime build is the slow step (~30 min cold). Cache it
+      # by version so the heavy work only runs when ONNXRUNTIME_VERSION changes.
+      - name: Cache ONNX Runtime build
+        id: cache-onnxruntime
+        uses: actions/cache@v4
+        with:
+          path: onnxruntime/build/MacOS/Release
+          key: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-x86_64-apple-darwin-v1
+
+      - name: Build ONNX Runtime from source (x86_64)
+        if: steps.cache-onnxruntime.outputs.cache-hit != 'true'
+        env:
+          VERSION: ${{ env.ONNXRUNTIME_VERSION }}
+        run: |
+          set -euo pipefail
+          git clone https://github.com/microsoft/onnxruntime --recursive \
+            --branch "$VERSION" --single-branch --depth 1
+          cd onnxruntime
+          # --skip_tests trims ~30% off the build by not compiling test executables
+          # (we only need the .a libs for ort-sys's static linking). Native build
+          # on this Intel runner — no cross-compile flags needed.
+          ./build.sh --update --build --config Release --parallel \
+            --compile_no_warning_as_error --skip_submodule_sync --skip_tests
+
+      - name: Import Developer ID cert into temp keychain
+        env:
+          CERT_B64: ${{ secrets.APPLE_DEV_ID_CERT_BASE64 }}
+          CERT_PASS: ${{ secrets.APPLE_DEV_ID_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_PASS=$(uuidgen)
+          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          printf '%s' "$CERT_B64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$CERT_PASS" \
+            -T /usr/bin/codesign -T /usr/bin/security
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | sed 's/"//g')
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Build release binary (x86_64) against from-source ONNX Runtime
+        env:
+          ORT_LIB_PATH: ${{ github.workspace }}/onnxruntime/build/MacOS/Release
+        run: cargo build --release --locked --target "$RUST_TARGET"
+
+      - name: Stage binary for bundle
+        run: |
+          mkdir -p target/release
+          cp "target/${RUST_TARGET}/release/utter" target/release/utter
+
+      - name: Build + sign .app bundle
+        run: ./scripts/make-bundle.sh
+
+      - name: Notarize + staple app bundle
+        run: |
+          set -euo pipefail
+          ditto -c -k --keepParent target/release/utter.app "$RUNNER_TEMP/utter.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/utter.zip" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple target/release/utter.app
+          xcrun stapler validate target/release/utter.app
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Create DMG
+        env:
+          RAW_VERSION: ${{ github.ref_name }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="${DISPATCH_TAG:-$RAW_VERSION}"
+          VERSION="${TAG#v}"
+          DMG_NAME="utter-${VERSION}-macos-x86_64.dmg"
+          mkdir -p dist
+          STAGE="$RUNNER_TEMP/dmg-stage"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          cp -R target/release/utter.app "$STAGE/"
+          create-dmg \
+            --volname "utter" \
+            --window-pos 200 120 \
+            --window-size 540 380 \
+            --icon-size 100 \
+            --icon "utter.app" 140 190 \
+            --app-drop-link 400 190 \
+            --hide-extension "utter.app" \
+            --no-internet-enable \
+            "dist/${DMG_NAME}" \
+            "$STAGE"
+
+      - name: Sign + notarize + staple DMG
+        run: |
+          set -euo pipefail
+          DMG=$(ls dist/utter-*-macos-x86_64.dmg)
+          codesign --force --sign "$UTTER_SIGN_IDENTITY" --timestamp "$DMG"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-macos-x86_64
+          path: dist/utter-*-macos-x86_64.dmg
+          if-no-files-found: error
+
   release:
     name: Publish release
-    needs: [build, macos-build]
+    needs: [build, macos-build, macos-intel-build]
     runs-on: ubuntu-24.04
     steps:
       - name: Download build artifacts
