@@ -13,7 +13,9 @@
 #   2. Fetch the latest utter release from GitHub.
 #   3. Download the right .rpm or .deb for your distro+arch.
 #   4. Install it via dnf / apt (pulls in ydotool, alsa-utils, wl-clipboard,
-#      libnotify as deps; drops udev + systemd files; enables ydotool).
+#      libnotify as deps — plus ydotoold on Debian/Ubuntu, where the daemon
+#      ships in a separate package; drops udev + systemd files; enables
+#      ydotool).
 #   5. Download the Parakeet model (~640 MB) as your user.
 #   6. Start utter-daemon and utter-watcher in your current session.
 
@@ -112,9 +114,9 @@ Verify anytime with:
     systemctl --user status utter-daemon utter-watcher
     journalctl --user -u utter-daemon -f
 
-To change the key (default: rightmeta), edit:
-    systemctl --user edit utter-watcher
+To change the PTT key (default: rightmeta), run:
+    utter set-key
 
-…and override ExecStart with e.g. --key capslock, --key f13, etc.
-See /usr/share/doc/utter/README.md for the full list.
+…then press and hold the key you want and release. The watcher restarts
+automatically. See /usr/share/doc/utter/README.md for details.
 EOM
