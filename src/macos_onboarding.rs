@@ -167,7 +167,7 @@ impl UtterOnboardingTarget {
 pub fn show(mtm: MainThreadMarker, on_start: Box<dyn FnOnce() + Send>) {
     unsafe {
         let target = UtterOnboardingTarget::new(mtm);
-        let target_ref: &AnyObject = &*target;
+        let target_ref: &AnyObject = &target;
 
         let window = build_window(mtm);
         let content = build_content(mtm, target_ref);
@@ -281,7 +281,7 @@ fn build_content(mtm: MainThreadMarker, target: &AnyObject) -> ContentViews {
             true,
             NSColor::labelColor(),
         );
-        stack.addArrangedSubview(&*title_as_view(&title));
+        stack.addArrangedSubview(&title_as_view(&title));
 
         let subtitle = make_label(
             mtm,
@@ -295,9 +295,9 @@ fn build_content(mtm: MainThreadMarker, target: &AnyObject) -> ContentViews {
         subtitle.setMaximumNumberOfLines(0);
         subtitle.setUsesSingleLineMode(false);
         subtitle.setPreferredMaxLayoutWidth(580.0 - 48.0);
-        stack.addArrangedSubview(&*title_as_view(&subtitle));
+        stack.addArrangedSubview(&title_as_view(&subtitle));
 
-        stack.addArrangedSubview(&*make_separator(mtm));
+        stack.addArrangedSubview(&make_separator(mtm));
 
         // Shared minimum width for the bold name column so the three status
         // labels ("Pending" / "After Input Monitoring") line up at the same
@@ -313,7 +313,7 @@ fn build_content(mtm: MainThreadMarker, target: &AnyObject) -> ContentViews {
             sel!(grantMic:),
             name_col_width,
         );
-        stack.addArrangedSubview(&*mic_row.view);
+        stack.addArrangedSubview(&mic_row.view);
 
         let im_row = make_row(
             mtm,
@@ -323,7 +323,7 @@ fn build_content(mtm: MainThreadMarker, target: &AnyObject) -> ContentViews {
             sel!(grantInputMonitoring:),
             name_col_width,
         );
-        stack.addArrangedSubview(&*im_row.view);
+        stack.addArrangedSubview(&im_row.view);
 
         let ax_row = make_row(
             mtm,
@@ -335,9 +335,9 @@ fn build_content(mtm: MainThreadMarker, target: &AnyObject) -> ContentViews {
         );
         // AX button is visible from the start; refresh_status() drives its
         // title ("Waiting…") and enabled state until IM is granted.
-        stack.addArrangedSubview(&*ax_row.view);
+        stack.addArrangedSubview(&ax_row.view);
 
-        stack.addArrangedSubview(&*make_separator(mtm));
+        stack.addArrangedSubview(&make_separator(mtm));
 
         // Footer: status text on the left, Start button on the right.
         let footer = NSStackView::new(mtm);
@@ -353,7 +353,7 @@ fn build_content(mtm: MainThreadMarker, target: &AnyObject) -> ContentViews {
             false,
             NSColor::secondaryLabelColor(),
         );
-        footer.addArrangedSubview(&*title_as_view(&footer_status));
+        footer.addArrangedSubview(&title_as_view(&footer_status));
 
         let spacer = make_spacer(mtm);
         footer.addArrangedSubview(&spacer);
@@ -365,7 +365,7 @@ fn build_content(mtm: MainThreadMarker, target: &AnyObject) -> ContentViews {
             mtm,
         );
         start_button.setEnabled(false);
-        footer.addArrangedSubview(&*button_as_view(&start_button));
+        footer.addArrangedSubview(&button_as_view(&start_button));
 
         stack.addArrangedSubview(&footer);
 
@@ -438,7 +438,7 @@ fn make_row(
             .widthAnchor()
             .constraintEqualToConstant(name_col_width)
             .setActive(true);
-        row.addArrangedSubview(&*title_as_view(&name_label));
+        row.addArrangedSubview(&title_as_view(&name_label));
 
         let status_label = make_label(
             mtm,
@@ -447,7 +447,7 @@ fn make_row(
             false,
             NSColor::secondaryLabelColor(),
         );
-        row.addArrangedSubview(&*title_as_view(&status_label));
+        row.addArrangedSubview(&title_as_view(&status_label));
 
         let spacer = make_spacer(mtm);
         row.addArrangedSubview(&spacer);
@@ -458,7 +458,7 @@ fn make_row(
             Some(action),
             mtm,
         );
-        row.addArrangedSubview(&*button_as_view(&button));
+        row.addArrangedSubview(&button_as_view(&button));
 
         Row {
             view: row,

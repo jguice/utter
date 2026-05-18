@@ -206,7 +206,7 @@ impl Dictionary {
                 rules.push(Rule::new(replacement, &entry.term));
             }
         }
-        rules.sort_by(|a, b| b.graphemes.cmp(&a.graphemes));
+        rules.sort_by_key(|rule| std::cmp::Reverse(rule.graphemes));
         rules
     }
 }
@@ -330,7 +330,7 @@ fn has_word_boundary_before(text: &str, start: usize, trigger: &str) -> bool {
     if !is_word_char(first) {
         return true;
     }
-    previous_char(text, start).map_or(true, |ch| !is_word_char(ch))
+    previous_char(text, start).is_none_or(|ch| !is_word_char(ch))
 }
 
 fn has_word_boundary_after(text: &str, end: usize, trigger: &str) -> bool {
@@ -342,7 +342,7 @@ fn has_word_boundary_after(text: &str, end: usize, trigger: &str) -> bool {
     }
     text.get(end..)
         .and_then(|rest| rest.chars().next())
-        .map_or(true, |ch| !is_word_char(ch))
+        .is_none_or(|ch| !is_word_char(ch))
 }
 
 fn previous_char(text: &str, start: usize) -> Option<char> {

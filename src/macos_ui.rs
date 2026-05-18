@@ -142,7 +142,7 @@ pub fn run_status_bar_app(
             // (SF Symbols require macOS 11+; utter already requires 13).
             let symbol_name = NSString::from_str("waveform.circle.fill");
             let a11y = NSString::from_str("utter");
-            let icon: Option<Retained<NSImage>> = unsafe {
+            let icon: Option<Retained<NSImage>> = {
                 msg_send_id![
                     objc2::class!(NSImage),
                     imageWithSystemSymbolName: &*symbol_name,
@@ -158,7 +158,7 @@ pub fn run_status_bar_app(
                 // 20pt + Regular weight visually matches adjacent system
                 // menu bar icons. setSize alone isn't enough; SF Symbols
                 // need a point-size configuration to actually render larger.
-                let config: Option<Retained<objc2::runtime::AnyObject>> = unsafe {
+                let config: Option<Retained<objc2::runtime::AnyObject>> = {
                     msg_send_id![
                         objc2::class!(NSImageSymbolConfiguration),
                         configurationWithPointSize: 18.0 as CGFloat,
@@ -166,7 +166,7 @@ pub fn run_status_bar_app(
                     ]
                 };
                 if let Some(config) = config {
-                    let sized: Option<Retained<NSImage>> = unsafe {
+                    let sized: Option<Retained<NSImage>> = {
                         msg_send_id![&*icon, imageWithSymbolConfiguration: &*config]
                     };
                     if let Some(sized) = sized {
@@ -197,7 +197,7 @@ pub fn run_status_bar_app(
         // so we leak this single Retained at the end so the target outlives
         // the menu items that point at it.
         let target = UtterMenuTarget::new(mtm);
-        let target_ref: &AnyObject = &*target;
+        let target_ref: &AnyObject = &target;
 
         // Capture env once to compute env-override greyout per toggle.
         let env = crate::config::utter_env_snapshot();
