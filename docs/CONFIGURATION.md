@@ -1,6 +1,6 @@
 # Configuration
 
-The basics — hold-to-talk, default key, changing the key — are in the [README quickstart](../README.md#quickstart). This page is the full reference: config file format, env var overrides, the PTT-key alias table, the recording indicator, and how services are laid out on Linux.
+The basics — hold-to-talk, default key, changing the key — are in the [README quickstart](../README.md#quickstart). This page is the full reference: config file format, custom dictionary corrections, env var overrides, the PTT-key alias table, the recording indicator, and how services are laid out on Linux.
 
 ## Config file
 
@@ -34,21 +34,66 @@ auto_paste = true
 # a single pasteboard and the auto-paste flow already uses it.
 write_clipboard = false
 
+# macOS: restore the previous clipboard contents after auto-pasting.
+# false = leave dictated text in the clipboard after paste.
+restore_clipboard_after_paste = true
+
 # Drop fillers (uh, um, er, ah, erm, hmm) and collapse stuttered
 # repetitions (`I I I think` → `I think`).
 filter_filler_words = true
 ```
 
+## Custom dictionary
+
+utter's dictionary is a separate TOML file for correcting repeated
+speech-to-text mistakes. It is local-only and is reloaded on the next dictation,
+so dictionary edits do not require restarting utter.
+
+- Linux: `~/.config/utter/dictionary.toml`
+- macOS: `~/Library/Application Support/utter/dictionary.toml`
+
+Use the CLI on either platform:
+
+```bash
+utter dictionary add LUFS --replace luffs
+utter dictionary add AcmeCloud --replace "acme cloud" --replace "acme clout"
+utter dictionary list
+utter dictionary remove LUFS
+utter dictionary path
+```
+
+Dictionary file format:
+
+```toml
+version = 1
+
+[[entries]]
+term = "LUFS"
+replace = ["luffs"]
+
+[[entries]]
+term = "AcmeCloud"
+replace = ["acme cloud", "acme clout"]
+```
+
+`term` is pasted exactly as written, including casing and punctuation. Each
+`replace` phrase is a heard-as transcription that should be rewritten to
+`term`; at least one `--replace` phrase is required when adding an entry.
+Matching is case-insensitive, Unicode-aware, phrase-boundary-aware, and
+non-recursive. Terms and replacement phrases are limited to 60 displayed
+characters.
+
 ## Env var overrides
 
 Every field above is overridable at runtime via an environment variable with the same name, upper-cased and prefixed `UTTER_` — e.g. `UTTER_AUTO_PASTE=0` wins over `auto_paste = true` in the file. Useful for one-off runs (`UTTER_AUTO_PASTE=0 utter daemon`) or systemd-drop-in tweaks without editing the file:
 
-| Env var                     | Values    | Overrides field       | Purpose                                                                 |
-|-----------------------------|-----------|-----------------------|-------------------------------------------------------------------------|
-| `UTTER_KEY`                 | name/code | `key`                 | PTT key.                                                                |
-| `UTTER_AUTO_PASTE`          | `0` / `1` | `auto_paste`          | Synthesize the paste shortcut.                                          |
-| `UTTER_WRITE_CLIPBOARD`     | `0` / `1` | `write_clipboard`     | Also write the regular clipboard (Linux only).                          |
-| `UTTER_FILTER_FILLER_WORDS` | `0` / `1` | `filter_filler_words` | Drop fillers (uh/um/er/ah/erm/hmm), collapse stutters.                  |
+| Env var                                | Values    | Overrides field                   | Purpose                                                                 |
+|----------------------------------------|-----------|-----------------------------------|-------------------------------------------------------------------------|
+| `UTTER_KEY`                            | name/code | `key`                             | PTT key.                                                                |
+| `UTTER_AUTO_PASTE`                     | `0` / `1` | `auto_paste`                      | Synthesize the paste shortcut.                                          |
+| `UTTER_WRITE_CLIPBOARD`                | `0` / `1` | `write_clipboard`                 | Also write the regular clipboard (Linux only).                          |
+| `UTTER_RESTORE_CLIPBOARD_AFTER_PASTE`  | `0` / `1` | `restore_clipboard_after_paste`   | Restore previous clipboard contents after macOS auto-paste.             |
+| `UTTER_FILTER_FILLER_WORDS`            | `0` / `1` | `filter_filler_words`             | Drop fillers (uh/um/er/ah/erm/hmm), collapse stutters.                  |
 
 These stay env-only (third-party tools, not utter's config):
 
