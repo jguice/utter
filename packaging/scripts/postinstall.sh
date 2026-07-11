@@ -9,18 +9,7 @@ if command -v udevadm >/dev/null 2>&1; then
     udevadm trigger --subsystem-match=input || true
 fi
 
-# Install & start ydotool (the system service that drives /dev/uinput).
-# Our drop-in at /etc/systemd/system/ydotool.service.d/owner.conf sets
-# a world-writable socket so utter running as any user can use it.
 if command -v systemctl >/dev/null 2>&1; then
-    systemctl daemon-reload || true
-    systemctl enable ydotool.service || true
-    # Use restart (not just enable --now) so the new drop-in takes effect on
-    # upgrade installs where ydotool was already running under the old config.
-    # restart on a stopped service just starts it, so this handles fresh
-    # installs too.
-    systemctl restart ydotool.service || true
-
     # --global enables the user services for every user on their next login.
     # Already-logged-in sessions need `systemctl --user daemon-reload` + start.
     systemctl --global enable utter-daemon.service utter-watcher.service || true

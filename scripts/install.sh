@@ -2,14 +2,12 @@
 # utter installer.
 #
 # What it does:
-#   1. Install system packages (openssl-dev, clang, cmake, alsa-utils,
-#      wl-clipboard, ydotool, libnotify)
+#   1. Install system packages (openssl-dev, clang, cmake, libnotify)
 #   2. Install rustup if `cargo` isn't on PATH
 #   3. `cargo install --path . --locked`
 #   4. Download the Parakeet model
-#   5. Drop in ydotool socket-owner config + enable the system service
-#   6. Add the user to the `input` group so the watcher can read evdev
-#   7. Install the utter-daemon and -watcher user services
+#   5. Add the user to the `input` group so the watcher can read evdev
+#   6. Install the utter-daemon and -watcher user services
 #
 # What it does NOT do:
 #   - Start the services (the `input` group change takes effect at next
@@ -42,7 +40,7 @@ fail() { echo "${RED}${BOLD}error:${RESET} $*" >&2; exit 1; }
   fail "XDG_RUNTIME_DIR not set. Run from within a systemd user session (a regular desktop login)."
 
 # Warn (but don't hard-fail) outside Wayland — clipboard/paste use wl-copy
-# and ydotool, which work on X11 too but our defaults assume Wayland.
+# clipboard/paste use wl-copy which works on X11 too but our defaults assume Wayland.
 if [[ "${XDG_SESSION_TYPE-}" != "wayland" ]]; then
   warn "XDG_SESSION_TYPE is '${XDG_SESSION_TYPE-unset}', not 'wayland'. Continuing, but auto-paste may misbehave."
 fi
@@ -62,20 +60,20 @@ step "Detected distro: ${ID:-unknown} ${VERSION_ID:-}"
 case "${ID:-}" in
   fedora|fedora-asahi-remix)
     INSTALL_CMD=(sudo dnf install -y)
-    PKGS=(openssl-devel pkgconf-pkg-config clang cmake gcc-c++ alsa-utils wl-clipboard libnotify ydotool)
+    PKGS=(openssl-devel pkgconf-pkg-config clang cmake gcc-c++)
     ;;
   debian|ubuntu|pop|linuxmint)
     INSTALL_CMD=(sudo apt-get install -y)
     sudo apt-get update
-    PKGS=(libssl-dev pkg-config clang cmake g++ alsa-utils wl-clipboard libnotify-bin ydotool)
+    PKGS=(libssl-dev pkg-config clang cmake g++)
     ;;
   arch|manjaro|endeavouros|cachyos)
     INSTALL_CMD=(sudo pacman -S --needed --noconfirm)
-    PKGS=(openssl pkgconf clang cmake gcc alsa-utils wl-clipboard libnotify ydotool)
+    PKGS=(openssl pkgconf clang cmake gcc)
     ;;
   *)
     warn "Unsupported distro '${ID:-?}'. Install these manually, then re-run:"
-    warn "  openssl-dev, pkg-config, clang, cmake, g++, alsa-utils, wl-clipboard, libnotify, ydotool"
+    warn "  openssl-dev, pkg-config, clang, cmake, g++"
     read -r -p "Continue anyway? [y/N] " cont
     [[ "$cont" == "y" || "$cont" == "Y" ]] || exit 1
     PKGS=()
@@ -137,24 +135,7 @@ fi
 step "Downloading Parakeet model (~640 MB, skipped if already present)"
 "$REPO_DIR/scripts/download-model.sh"
 
-# --- 5. ydotool system service + drop-in ------------------------------------
-
-UID_NUM="$(id -u)"
-GID_NUM="$(id -g)"
-
-step "Configuring ydotool system service (sudo)"
-sudo mkdir -p /etc/systemd/system/ydotool.service.d
-# Regenerate the drop-in with the actual UID:GID instead of shipping a
-# hard-coded 1000:1000 — different distros assign different first-user UIDs.
-sudo tee /etc/systemd/system/ydotool.service.d/owner.conf >/dev/null <<EOF
-[Service]
-ExecStart=
-ExecStart=/usr/bin/ydotoold --socket-own=${UID_NUM}:${GID_NUM}
-EOF
-sudo systemctl daemon-reload
-sudo systemctl enable --now ydotool
-
-# --- 6. input group membership ----------------------------------------------
+# --- 5. input group membership ----------------------------------------------
 
 if id -nG "$USER" | tr ' ' '\n' | grep -qx input; then
   info "already in 'input' group"
@@ -164,7 +145,7 @@ else
   GROUP_NEEDS_RELOGIN=1
 fi
 
-# --- 7. user systemd services -----------------------------------------------
+# --- 6. user systemd services -----------------------------------------------
 
 step "Installing utter user services"
 mkdir -p "$HOME/.config/systemd/user"

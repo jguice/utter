@@ -14,15 +14,19 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 env_logger = "0.11"
 log = "0.4"
-nix = { version = "0.29", features = ["signal"] }
+cpal = "0.15"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { version = "0.13", features = ["tokio"] }
+wl-clipboard-rs = "0.9"
+reis = { version = "0.7", features = ["tokio"] }
+ashpd = { version = "0.13", default-features = false, features = ["remote_desktop", "screencast", "tokio"] }
+enumflags2 = "0.7"
+xkbcommon-dl = "0.4"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-cpal = "0.15"
 core-graphics = "0.24"
 core-foundation = "0.10"
 objc2 = "0.5"

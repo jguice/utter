@@ -9,9 +9,7 @@ ExecStart=/usr/bin/utter daemon
 Restart=on-failure
 RestartSec=2
 # User-facing knobs (auto_paste, write_clipboard, filter_filler_words,
-# PTT key) live in ~/.config/utter/config.toml. YDOTOOL_SOCKET and RUST_LOG remain here
-# because they configure third-party tools, not utter itself.
-Environment=YDOTOOL_SOCKET=/tmp/.ydotool_socket
+# PTT key) live in ~/.config/utter/config.toml.
 Environment=RUST_LOG=info
 
 [Install]

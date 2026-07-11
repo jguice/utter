@@ -26,7 +26,7 @@ Default contents:
 # PTT key: named alias or numeric evdev keycode (as a string).
 key = "rightmeta"
 
-# Synthesize the paste shortcut (Shift+Insert on Linux, Cmd+V on macOS).
+# Synthesize the paste shortcut (via EI protocol on Linux, Cmd+V on macOS).
 # false = user pastes manually.
 auto_paste = true
 
@@ -37,6 +37,12 @@ write_clipboard = false
 # Drop fillers (uh, um, er, ah, erm, hmm) and collapse stuttered
 # repetitions (`I I I think` → `I think`).
 filter_filler_words = true
+
+# How long the keyboard-input permission lasts after you approve it.
+# "persistent" — remembered forever (until manually revoked).
+# "session" — remembered while the daemon is running; prompted again
+# on restart.
+permission_lifetime = "persistent"
 ```
 
 ## Env var overrides
@@ -49,12 +55,12 @@ Every field above is overridable at runtime via an environment variable with the
 | `UTTER_AUTO_PASTE`          | `0` / `1` | `auto_paste`          | Synthesize the paste shortcut.                                          |
 | `UTTER_WRITE_CLIPBOARD`     | `0` / `1` | `write_clipboard`     | Also write the regular clipboard (Linux only).                          |
 | `UTTER_FILTER_FILLER_WORDS` | `0` / `1` | `filter_filler_words` | Drop fillers (uh/um/er/ah/erm/hmm), collapse stutters.                  |
+| `UTTER_PERMISSION_LIFETIME` | `persistent` / `session` | `permission_lifetime` | How long the keyboard-input permission lasts.                           |
 
 These stay env-only (third-party tools, not utter's config):
 
 | Env var          | Default                 | Purpose                                                                 |
 |------------------|-------------------------|-------------------------------------------------------------------------|
-| `YDOTOOL_SOCKET` | `/tmp/.ydotool_socket`  | Socket path for the ydotool daemon (Linux; only change if you relocated it). |
 | `RUST_LOG`       | `info`                  | Log verbosity (`journalctl --user -u utter-daemon` on Linux; `log stream --process utter` on macOS). |
 
 Precedence: **CLI flag > env var > config file > default.**

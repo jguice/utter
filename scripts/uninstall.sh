@@ -128,16 +128,6 @@ else
   rm -f "$HOME/.config/systemd/user/utter-daemon.service"
   rm -f "$HOME/.config/systemd/user/utter-watcher.service"
   rm -f "$HOME/.cargo/bin/utter"
-
-  # Only remove the ydotool drop-in if it was not the one shipped by a
-  # package. Since we just established this is a from-source install, any
-  # drop-in here is ours to clean up.
-  if [[ -f /etc/systemd/system/ydotool.service.d/owner.conf ]]; then
-    step "Removing ydotool socket-owner drop-in (sudo)"
-    sudo rm -f /etc/systemd/system/ydotool.service.d/owner.conf
-    sudo rmdir /etc/systemd/system/ydotool.service.d 2>/dev/null || true
-    sudo systemctl daemon-reload || true
-  fi
 fi
 
 # --- remove user-created service overrides ----------------------------------
@@ -177,8 +167,6 @@ echo "${GREEN}${BOLD}Uninstall complete.${RESET}"
 echo
 cat <<'EOM'
 Notes:
-- ydotool was not removed — it may be used by other tools on your system.
-  To remove it anyway: sudo dnf remove -y ydotool    (or apt remove)
 - Your `input` group membership (if any) was left alone. To drop it:
       sudo gpasswd -d "$USER" input
   …then log out / log in for the change to take effect.

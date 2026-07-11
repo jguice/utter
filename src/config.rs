@@ -24,6 +24,11 @@ pub struct Config {
     /// repetitions (`I I I think` → `I think`, `wh wh wh what` → `what`)
     /// before emitting text.
     pub filter_filler_words: bool,
+    /// How long the keyboard-input permission (EI portal) lasts.
+    /// `"persistent"` — remembered forever (until manually revoked).
+    /// `"session"` — remembered while the daemon is running; prompt
+    /// again on restart.
+    pub permission_lifetime: String,
 }
 
 impl Default for Config {
@@ -33,6 +38,7 @@ impl Default for Config {
             auto_paste: true,
             write_clipboard: false,
             filter_filler_words: true,
+            permission_lifetime: "persistent".to_string(),
         }
     }
 }
@@ -54,7 +60,8 @@ impl Config {
         format!(
             "# utter configuration. Managed by `utter set-key` and edited by hand.\n\
              # Env vars (UTTER_KEY, UTTER_AUTO_PASTE, UTTER_WRITE_CLIPBOARD,\n\
-             # UTTER_FILTER_FILLER_WORDS) override any value set here.\n\
+             # UTTER_FILTER_FILLER_WORDS, UTTER_PERMISSION_LIFETIME) override any\n\
+             # value set here.\n\
              \n\
              # PTT key: named alias (rightmeta, capslock, f13, ...) or numeric evdev\n\
              # keycode as a string.\n\
@@ -69,11 +76,18 @@ impl Config {
              \n\
              # Drop fillers (uh, um, er, ah, erm, hmm) and collapse stuttered\n\
              # repetitions (`I I I think` → `I think`).\n\
-             filter_filler_words = {filter_filler_words}\n",
+             filter_filler_words = {filter_filler_words}\n\
+             \n\
+             # How long the keyboard-input permission lasts after you approve it.\n\
+             # \"persistent\" — remembered forever (until manually revoked).\n\
+             # \"session\" — remembered while the daemon is running; prompted again\n\
+             # on restart.\n\
+             permission_lifetime = {permission_lifetime:?}\n",
             key = self.key,
             auto_paste = self.auto_paste,
             write_clipboard = self.write_clipboard,
             filter_filler_words = self.filter_filler_words,
+            permission_lifetime = self.permission_lifetime,
         )
     }
 
@@ -94,6 +108,15 @@ impl Config {
         if let Some(v) = env.get("UTTER_FILTER_FILLER_WORDS") {
             self.filter_filler_words =
                 parse_bool_env("UTTER_FILTER_FILLER_WORDS", v).unwrap_or(self.filter_filler_words);
+        }
+        if let Some(v) = env.get("UTTER_PERMISSION_LIFETIME") {
+            if matches!(v.as_str(), "persistent" | "session") {
+                self.permission_lifetime = v.clone();
+            } else {
+                log::warn!(
+                    "ignoring UTTER_PERMISSION_LIFETIME={v:?} (expected \"persistent\" or \"session\")"
+                );
+            }
         }
         self
     }
@@ -148,6 +171,12 @@ impl Config {
     #[allow(dead_code)]
     pub fn with_filter_filler_words(mut self, v: bool) -> Self {
         self.filter_filler_words = v;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn with_permission_lifetime(mut self, v: impl Into<String>) -> Self {
+        self.permission_lifetime = v.into();
         self
     }
 
@@ -217,7 +246,10 @@ mod tests {
     use super::*;
 
     fn env(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -225,8 +257,15 @@ mod tests {
         let c = Config::default();
         assert_eq!(c.key, "rightmeta");
         assert!(c.auto_paste, "auto_paste on by default");
-        assert!(!c.write_clipboard, "write_clipboard off by default — don't pollute");
+        assert!(
+            !c.write_clipboard,
+            "write_clipboard off by default — don't pollute"
+        );
         assert!(c.filter_filler_words, "filter_filler_words on by default");
+        assert_eq!(
+            c.permission_lifetime, "persistent",
+            "permission_lifetime defaults to persistent"
+        );
     }
 
     #[test]
@@ -236,6 +275,7 @@ mod tests {
             auto_paste: false,
             write_clipboard: true,
             filter_filler_words: false,
+            permission_lifetime: "persistent".to_string(),
         };
         let text = original.to_toml();
         let parsed = Config::from_toml(&text).unwrap();
@@ -266,7 +306,10 @@ mod tests {
         let text = "key = \"rightmeta\"\nunknown_knob = 42\n";
         let err = Config::from_toml(text).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains("unknown") || msg.contains("unknown_knob"), "err was: {msg}");
+        assert!(
+            msg.contains("unknown") || msg.contains("unknown_knob"),
+            "err was: {msg}"
+        );
     }
 
     #[test]
@@ -298,8 +341,11 @@ mod tests {
             auto_paste: false,
             write_clipboard: true,
             filter_filler_words: false,
+            permission_lifetime: "persistent".to_string(),
         };
-        let c = base.clone().with_env_overrides(&env(&[("PATH", "/usr/bin")]));
+        let c = base
+            .clone()
+            .with_env_overrides(&env(&[("PATH", "/usr/bin")]));
         assert_eq!(c, base);
     }
 
@@ -332,10 +378,7 @@ mod tests {
         let path = tmp.path().join("utter/config.toml");
         assert!(!path.exists());
 
-        let e = env(&[
-            ("UTTER_AUTO_PASTE", "0"),
-            ("UTTER_KEY", "f13"),
-        ]);
+        let e = env(&[("UTTER_AUTO_PASTE", "0"), ("UTTER_KEY", "f13")]);
         let c = Config::load_or_migrate(&path, &e).unwrap();
 
         assert!(path.exists(), "config file written");
@@ -369,6 +412,7 @@ mod tests {
             write_clipboard: true,
             filter_filler_words: false,
             key: "rightmeta".to_string(),
+            permission_lifetime: "persistent".to_string(),
         };
         let updated = c.clone().with_key("f13");
         assert_eq!(updated.key, "f13");
@@ -397,9 +441,7 @@ mod tests {
 
     #[test]
     fn with_flag_methods_chain_with_with_key() {
-        let c = Config::default()
-            .with_key("f13")
-            .with_auto_paste(false);
+        let c = Config::default().with_key("f13").with_auto_paste(false);
         assert_eq!(c.key, "f13");
         assert!(!c.auto_paste);
     }
@@ -424,5 +466,40 @@ mod tests {
         let c = Config::load_or_migrate(&path, &HashMap::new()).unwrap();
         assert_eq!(c, Config::default());
         assert!(path.exists(), "file written with defaults");
+    }
+
+    #[test]
+    fn env_overrides_permission_lifetime() {
+        let c =
+            Config::default().with_env_overrides(&env(&[("UTTER_PERMISSION_LIFETIME", "session")]));
+        assert_eq!(c.permission_lifetime, "session");
+    }
+
+    #[test]
+    fn env_bogus_permission_lifetime_preserves_default() {
+        let c =
+            Config::default().with_env_overrides(&env(&[("UTTER_PERMISSION_LIFETIME", "garbage")]));
+        assert_eq!(
+            c.permission_lifetime, "persistent",
+            "bogus value didn't change field"
+        );
+    }
+
+    #[test]
+    fn permission_lifetime_toml_roundtrip() {
+        let original = Config::default().with_permission_lifetime("session");
+        let text = original.to_toml();
+        let parsed = Config::from_toml(&text).unwrap();
+        assert_eq!(parsed.permission_lifetime, "session");
+    }
+
+    #[test]
+    fn to_toml_includes_permission_lifetime() {
+        let c = Config::default().with_permission_lifetime("session");
+        let text = c.to_toml();
+        assert!(
+            text.contains("permission_lifetime = \"session\""),
+            "missing in TOML output"
+        );
     }
 }

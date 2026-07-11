@@ -10,7 +10,8 @@ The common paths (macOS DMG + Linux one-liner) are covered in the [README quicks
 
 **Linux** (tested on Fedora Asahi Remix + KDE Plasma 6)
 - Wayland and systemd user sessions
-- A working microphone (`wpctl status` should show it; `arecord -d 2 /tmp/test.wav && aplay /tmp/test.wav` to verify)
+- A working microphone (`wpctl status` should show it)
+- Member of the `input` group (`sudo usermod -aG input $USER`, then log out/in). The package installs a udev rule that may handle this via `uaccess` ACLs, but group membership is the reliable fallback.
 
 **Both**
 - ~1 GB RAM for the loaded model, ~650 MB disk for the model files
@@ -34,7 +35,7 @@ sudo dnf install ./utter-*.rpm
 sudo apt install ./utter_*.deb
 ```
 
-The package pulls in its runtime deps (`ydotool`, `alsa-utils`, `wl-clipboard`, `libnotify`), drops a udev rule for keyboard access via `uaccess` (no `usermod` needed), registers systemd user services, and configures the ydotool socket. It does **not** start the services or fetch the model — do that now:
+The package pulls in its runtime deps, drops a udev rule for keyboard access via `uaccess`, and registers systemd user services. It does **not** start the services or fetch the model — do that now:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jguice/utter/main/scripts/download-model.sh | bash
@@ -42,12 +43,18 @@ systemctl --user daemon-reload
 systemctl --user enable --now utter-daemon utter-watcher
 ```
 
+If the watcher fails to start (check with `journalctl --user -u utter-watcher -n 20`), the `uaccess` ACL may not be working on your system. Add yourself to the `input` group as a fallback:
+
+```bash
+sudo usermod -aG input $USER
+# Log out and back in for the group change to take effect.
+```
+
 ## Verify
 
 ```bash
 utter --version                                        # prints version
 systemctl --user is-active utter-daemon utter-watcher  # both "active" (Linux)
-systemctl is-active ydotool                            # "active" (Linux)
 ```
 
 If any of those fail, jump to [Troubleshooting](TROUBLESHOOTING.md).
@@ -55,6 +62,8 @@ If any of those fail, jump to [Troubleshooting](TROUBLESHOOTING.md).
 ## From source (advanced)
 
 Most users won't need this — skip unless no prebuilt package matches your system, or you want to hack on utter.
+
+System libraries: you'll need the ALSA development headers (`alsa-devel` on Fedora/openSUSE, `libasound2-dev` on Debian/Ubuntu). Runtime libraries are already present on any system with audio output.
 
 ```bash
 git clone https://github.com/jguice/utter.git

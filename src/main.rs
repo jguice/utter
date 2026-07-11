@@ -2,23 +2,19 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::io::Read;
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
-
-#[cfg(target_os = "linux")]
-use std::process::Stdio;
-#[cfg(target_os = "linux")]
-use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(target_os = "linux")]
-use tokio::process::{Child, Command};
 
 use transcribe_rs::onnx::parakeet::{ParakeetModel, ParakeetParams};
 use transcribe_rs::onnx::Quantization;
 
 mod config;
 use config::Config;
+
+mod audio;
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -100,15 +96,6 @@ fn socket_path() -> Result<PathBuf> {
 fn default_model_dir() -> Result<PathBuf> {
     let data = dirs::data_dir().ok_or_else(|| anyhow!("no data dir"))?;
     Ok(data.join("utter/models/parakeet-tdt-0.6b-v3-int8"))
-}
-
-#[cfg(target_os = "linux")]
-fn fresh_wav_path() -> PathBuf {
-    let ts = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("utter-{ts}.wav"))
 }
 
 fn main() -> Result<()> {
@@ -256,22 +243,171 @@ async fn send_command(cmd: &str) -> Result<()> {
     Ok(())
 }
 
-#[cfg(target_os = "linux")]
 enum State {
     Idle,
-    Recording { child: Child, wav_path: PathBuf },
+    Recording { capture: audio::AudioCapture },
 }
 
-#[cfg(target_os = "macos")]
-enum State {
-    Idle,
-    Recording { capture: macos::AudioCapture },
+/// Cached EI (Emulated Input) state reused across dictations to avoid
+/// creating a new XDG RemoteDesktop portal session per dictation.
+#[cfg(target_os = "linux")]
+struct EiState {
+    context: reis::ei::Context,
+    device: reis::ei::Device,
+    keyboard: reis::ei::Keyboard,
+    keymap: *mut xkbcommon_dl::xkb_keymap,
+    xkb_state: *mut xkbcommon_dl::xkb_state,
+}
+
+// Safety: The raw XKB pointers are only accessed from the async runtime
+// (single-threaded logical access via Mutex).
+#[cfg(target_os = "linux")]
+unsafe impl Send for EiState {}
+
+/// Wrapper to make raw XKB pointers Send-safe for use across `.await` points.
+/// The pointers are only dereferenced in unsafe blocks within the async runtime.
+#[cfg(target_os = "linux")]
+struct SendPtr<T>(*mut T);
+#[cfg(target_os = "linux")]
+unsafe impl<T> Send for SendPtr<T> {}
+
+#[cfg(target_os = "linux")]
+impl Drop for EiState {
+    fn drop(&mut self) {
+        let xkb = xkbcommon_dl::xkbcommon_handle();
+        unsafe {
+            if !self.xkb_state.is_null() {
+                (xkb.xkb_state_unref)(self.xkb_state);
+            }
+            if !self.keymap.is_null() {
+                (xkb.xkb_keymap_unref)(self.keymap);
+            }
+        }
+    }
+}
+
+/// Parse an XKB keymap from a file descriptor received from the compositor
+/// and create an xkb_state from it.
+#[cfg(target_os = "linux")]
+unsafe fn parse_keymap_from_fd(
+    fd: std::os::unix::io::OwnedFd,
+) -> Result<(*mut xkbcommon_dl::xkb_keymap, *mut xkbcommon_dl::xkb_state)> {
+    let xkb = xkbcommon_dl::xkbcommon_handle();
+
+    let mut file = std::fs::File::from(fd);
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .context("read keymap fd")?;
+
+    let ctx = (xkb.xkb_context_new)(xkbcommon_dl::xkb_context_flags::XKB_CONTEXT_NO_FLAGS);
+    if ctx.is_null() {
+        return Err(anyhow!("xkb_context_new failed"));
+    }
+
+    let keymap = (xkb.xkb_keymap_new_from_buffer)(
+        ctx,
+        buf.as_ptr() as *const _,
+        buf.len(),
+        xkbcommon_dl::xkb_keymap_format::XKB_KEYMAP_FORMAT_TEXT_V1,
+        xkbcommon_dl::xkb_keymap_compile_flags::XKB_KEYMAP_COMPILE_NO_FLAGS,
+    );
+    (xkb.xkb_context_unref)(ctx);
+
+    if keymap.is_null() {
+        return Err(anyhow!("xkb_keymap_new_from_buffer failed"));
+    }
+
+    let state = (xkb.xkb_state_new)(keymap);
+    if state.is_null() {
+        (xkb.xkb_keymap_unref)(keymap);
+        return Err(anyhow!("xkb_state_new failed"));
+    }
+
+    log::info!("ei: parsed XKB keymap from compositor");
+    Ok((keymap, state))
+}
+
+/// Map an ASCII character to an evdev keycode and whether Shift is needed.
+/// Uses US QWERTY layout. For non-ASCII chars, falls back to the XKB keymap
+/// using `find_key_for_char_xkb`.
+#[cfg(target_os = "linux")]
+fn char_to_evdev(ch: char) -> Option<(u32, bool)> {
+    // evdev keycodes for a-z from linux/input-event-codes.h (non-sequential).
+    const EVDEV_A_TO_Z: [u32; 26] = [
+        30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38, 50, // a-m
+        49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44, // n-z
+    ];
+    Some(match ch {
+        'a'..='z' => (EVDEV_A_TO_Z[(ch as u8 - b'a') as usize], false),
+        'A'..='Z' => (EVDEV_A_TO_Z[(ch as u8 - b'A') as usize], true),
+        '0' => (11, false), '1' => (2, false), '2' => (3, false),
+        '3' => (4, false), '4' => (5, false), '5' => (6, false),
+        '6' => (7, false), '7' => (8, false), '8' => (9, false), '9' => (10, false),
+        ' ' => (57, false),
+        '-' => (12, false), '=' => (13, false),
+        '[' => (26, false), ']' => (27, false),
+        ';' => (39, false), '\'' => (40, false), '`' => (41, false),
+        '\\' => (43, false), ',' => (51, false), '.' => (52, false), '/' => (53, false),
+        '_' => (12, true), '+' => (13, true),
+        '{' => (26, true), '}' => (27, true),
+        ':' => (39, true), '"' => (40, true), '~' => (41, true),
+        '|' => (43, true), '<' => (51, true), '>' => (52, true), '?' => (53, true),
+        '!' => (2, true), '@' => (3, true), '#' => (4, true), '$' => (5, true),
+        '%' => (6, true), '^' => (7, true), '&' => (8, true), '*' => (9, true),
+        '(' => (10, true), ')' => (11, true),
+        '\n' => (28, false), '\t' => (15, false),
+        _ => return None,
+    })
+}
+
+/// Fallback: find the XKB keycode for a non-ASCII character using the XKB
+/// keymap. Returns `(evdev_keycode, shift_needed)` by subtracting the
+/// standard XKB offset (8) from the XKB keycode.
+#[cfg(target_os = "linux")]
+unsafe fn find_key_for_char_xkb(
+    keymap: *mut xkbcommon_dl::xkb_keymap,
+    ch: char,
+) -> Option<(u32, bool)> {
+    let xkb = xkbcommon_dl::xkbcommon_handle();
+    let target_cp = ch as u32;
+    let min = (xkb.xkb_keymap_min_keycode)(keymap);
+    let max = (xkb.xkb_keymap_max_keycode)(keymap);
+    let shift_idx = (xkb.xkb_keymap_mod_get_index)(
+        keymap,
+        xkbcommon_dl::XKB_MOD_NAME_SHIFT.as_ptr() as *const _,
+    );
+
+    for code in min..=max {
+        let num_layouts = (xkb.xkb_keymap_num_layouts_for_key)(keymap, code);
+        for layout in 0..num_layouts {
+            let num_levels = (xkb.xkb_keymap_num_levels_for_key)(keymap, code, layout);
+            for level in 0..num_levels {
+                let mut syms_ptr: *const xkbcommon_dl::xkb_keysym_t = std::ptr::null();
+                let count = (xkb.xkb_keymap_key_get_syms_by_level)(
+                    keymap, code, layout, level, &mut syms_ptr,
+                );
+                if count > 0 {
+                    let sym = *syms_ptr;
+                    let cp = (xkb.xkb_keysym_to_utf32)(sym);
+                    if cp == target_cp {
+                        // XKB keycode = evdev keycode + 8 (standard offset)
+                        let evdev_code = code.saturating_sub(8).max(1);
+                        let shift = level == 1 && shift_idx < 32;
+                        return Some((evdev_code, shift));
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 struct Daemon {
     model: Arc<Mutex<ParakeetModel>>,
     state: Mutex<State>,
     config: Config,
+    #[cfg(target_os = "linux")]
+    ei_state: Mutex<Option<EiState>>,
 }
 
 async fn run_daemon(model_override: Option<PathBuf>) -> Result<()> {
@@ -315,6 +451,8 @@ async fn run_daemon(model_override: Option<PathBuf>) -> Result<()> {
         model: Arc::new(Mutex::new(model)),
         state: Mutex::new(State::Idle),
         config: cfg,
+        #[cfg(target_os = "linux")]
+        ei_state: Mutex::new(None),
     });
 
     let sock_cleanup = socket.clone();
@@ -394,25 +532,8 @@ async fn start_recording(daemon: &Daemon) -> Result<()> {
     if matches!(*state, State::Recording { .. }) {
         return Err(anyhow!("already recording"));
     }
-    #[cfg(target_os = "linux")]
-    {
-        let wav_path = fresh_wav_path();
-        log::info!("recording to {}", wav_path.display());
-        let child = Command::new("arecord")
-            .args(["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav"])
-            .arg(&wav_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-            .context("spawn arecord (is alsa-utils installed?)")?;
-        *state = State::Recording { child, wav_path };
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let capture = macos::start_audio().await.context("start cpal input stream")?;
-        *state = State::Recording { capture };
-    }
+    let capture = audio::start_audio().await.context("start cpal input stream")?;
+    *state = State::Recording { capture };
     Ok(())
 }
 
@@ -457,52 +578,14 @@ async fn stop_and_transcribe(daemon: &Daemon) -> Result<String> {
         format!("{cleaned} ")
     };
     if !out.is_empty() {
-        emit_text(&out, &daemon.config).await;
+        emit_text(&out, daemon).await;
     }
     Ok(out)
 }
 
-#[cfg(target_os = "linux")]
-async fn obtain_samples(state: State) -> Result<Vec<f32>> {
-    let (mut child, wav_path) = match state {
-        State::Recording { child, wav_path } => (child, wav_path),
-        State::Idle => return Err(anyhow!("not recording")),
-    };
-    if let Some(pid) = child.id() {
-        use nix::sys::signal::{kill, Signal};
-        use nix::unistd::Pid;
-        let _ = kill(Pid::from_raw(pid as i32), Signal::SIGINT);
-    }
-    let _ = child.wait().await;
-
-    // Empty WAVs mean arecord opened the device but never got audio frames —
-    // usually a PipeWire/ALSA "Cannot allocate memory" error on the source.
-    let wav_meta = tokio::fs::metadata(&wav_path).await.ok();
-    let wav_size = wav_meta.map(|m| m.len()).unwrap_or(0);
-    if wav_size <= 128 {
-        let _ = tokio::fs::remove_file(&wav_path).await;
-        return Err(anyhow!(
-            "no audio captured ({wav_size}B WAV). Check your mic with \
-             `wpctl status` and `journalctl --user -n 30 | grep spa.alsa`. \
-             On Asahi, the built-in mic may fail with `set_hw_params: \
-             Cannot allocate memory` — plug in a USB or 3.5mm headset mic."
-        ));
-    }
-
-    let samples = tokio::task::spawn_blocking({
-        let p = wav_path.clone();
-        move || transcribe_rs::audio::read_wav_samples(&p)
-    })
-    .await??;
-
-    let _ = tokio::fs::remove_file(&wav_path).await;
-    Ok(samples)
-}
-
-#[cfg(target_os = "macos")]
 async fn obtain_samples(state: State) -> Result<Vec<f32>> {
     match state {
-        State::Recording { capture } => macos::stop_audio(capture).await,
+        State::Recording { capture } => audio::stop_audio(capture).await,
         State::Idle => Err(anyhow!("not recording")),
     }
 }
@@ -591,31 +674,30 @@ fn cleanup_transcription(text: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-async fn emit_text(text: &str, cfg: &Config) {
+async fn emit_text(text: &str, daemon: &Daemon) {
     let t0 = Instant::now();
     log::info!(
         "emit: start (len={}, write_clipboard={}, auto_paste={})",
         text.len(),
-        cfg.write_clipboard,
-        cfg.auto_paste
+        daemon.config.write_clipboard,
+        daemon.config.auto_paste
     );
 
-    if let Err(e) = wl_copy(text, cfg.write_clipboard).await {
-        log::warn!("wl-copy failed: {e:#}");
+    // Best-effort write to Wayland primary selection (and optionally the
+    // regular clipboard) for clipboard-manager users. Ignore errors —
+    // the real paste path is EI typing below.
+    if let Err(e) = wl_copy(text, daemon.config.write_clipboard) {
+        log::warn!("wl-copy (best-effort) failed: {e:#}");
     }
     log::info!("emit: wl_copy returned at +{:?}", t0.elapsed());
 
-    if cfg.auto_paste {
-        let matched = verify_primary(text.trim_end(), t0).await;
-        if !matched {
-            log::warn!("emit: primary never matched before paste — firing anyway");
+    if daemon.config.auto_paste {
+        if let Err(e) = ei_type_text(text, daemon).await {
+            log::warn!("ei type failed: {e:#}");
         }
-        if let Err(e) = ydotool_keys(&["42:1", "110:1", "110:0", "42:0"]).await {
-            log::warn!("paste failed: {e:#}");
-        }
-        log::info!("emit: ydotool returned at +{:?}", t0.elapsed());
+        log::info!("emit: ei_type returned at +{:?}", t0.elapsed());
     } else {
-        log::info!("emit: auto_paste off, not synthesizing paste");
+        log::info!("emit: auto_paste off, not typing");
     }
 }
 
@@ -629,121 +711,432 @@ async fn emit_text(text: &str, cfg: &Config) {
     log::info!("emit: returned at +{:?}", t0.elapsed());
 }
 
+/// Write text to the Wayland primary selection (and optionally the regular
+/// clipboard) via the `wlr-data-control` protocol. Blocking — keeps the
+/// Wayland connection open until the receiving app has consumed the data,
+/// so the selection stays valid for the subsequent Shift+Insert paste.
 #[cfg(target_os = "linux")]
-async fn verify_primary(expected: &str, t0: Instant) -> bool {
-    // Budget: up to 300ms total, polling every 10ms. Real compositor
-    // latency observed so far is in the <50ms range; the high bound is
-    // so we don't hang if wl-paste breaks entirely.
-    let deadline = std::time::Duration::from_millis(300);
-    let poll = std::time::Duration::from_millis(10);
-    let mut attempts = 0u32;
-    loop {
-        attempts += 1;
-        match read_primary().await {
-            Ok(got) => {
-                let got_trim = got.trim_end();
-                if got_trim == expected {
-                    log::info!(
-                        "emit: primary matched after {attempts} poll(s) at +{:?}",
-                        t0.elapsed()
-                    );
-                    return true;
-                }
-                if attempts == 1 || t0.elapsed() >= deadline {
-                    let preview: String =
-                        got_trim.chars().take(60).collect::<String>() + if got_trim.chars().count() > 60 { "…" } else { "" };
-                    log::info!(
-                        "emit: primary mismatch attempt={attempts} elapsed={:?} got={:?}",
-                        t0.elapsed(),
-                        preview
-                    );
-                }
-            }
-            Err(e) => {
-                log::info!("emit: wl-paste failed (attempt {attempts}): {e:#}");
-            }
-        }
-        if t0.elapsed() >= deadline {
-            return false;
-        }
-        tokio::time::sleep(poll).await;
-    }
-}
+fn wl_copy(text: &str, also_clipboard: bool) -> Result<()> {
+    use wl_clipboard_rs::copy::{ClipboardType, MimeType, Options, Source};
 
-#[cfg(target_os = "linux")]
-async fn read_primary() -> Result<String> {
-    let output = Command::new("wl-paste")
-        .arg("--primary")
-        .arg("--no-newline")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .await
-        .context("spawn wl-paste")?;
-    if !output.status.success() {
-        return Err(anyhow!("wl-paste exited {}", output.status));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
+    let mut opts = Options::new();
+    opts.clipboard(ClipboardType::Primary);
+    let bytes = text.as_bytes().to_vec();
+    opts.copy(Source::Bytes(bytes.into()), MimeType::Text)
+        .context("wl-clipboard-rs: copy to primary selection")?;
 
-#[cfg(target_os = "linux")]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum Selection {
-    Primary,
-    Clipboard,
-}
-
-/// Which wl-copy targets to write. `also_clipboard = false` (the default)
-/// writes only the primary selection and leaves the regular clipboard
-/// untouched.
-#[cfg(target_os = "linux")]
-fn selections_to_write(also_clipboard: bool) -> &'static [Selection] {
     if also_clipboard {
-        &[Selection::Primary, Selection::Clipboard]
+        let mut opts = Options::new();
+        opts.clipboard(ClipboardType::Regular);
+        let bytes = text.as_bytes().to_vec();
+        opts.copy(Source::Bytes(bytes.into()), MimeType::Text)
+            .context("wl-clipboard-rs: copy to clipboard")?;
+    }
+    Ok(())
+}
+
+/// Paste via the Wayland EI (Emulated Input) protocol using the `reis` crate.
+/// Connects to the compositor's EIS server, creates a virtual keyboard, and
+/// sends Shift+Insert. Reuses a cached EI context across dictations to avoid
+/// creating a new XDG RemoteDesktop portal session each time.
+#[cfg(target_os = "linux")]
+
+/// Type text character-by-character via the EI virtual keyboard, using the
+/// compositor's XKB keymap to resolve each character to the correct keycode
+/// and modifier state. This avoids the clipboard entirely.
+#[cfg(target_os = "linux")]
+async fn ei_type_text(text: &str, daemon: &Daemon) -> Result<()> {
+    use reis::ei;
+    use std::collections::HashMap;
+
+    const KEY_LEFTSHIFT: u32 = 42;
+    const KEY_INSERT: u32 = 110;
+
+    // Check if we have a usable cached EI context. Reuse it regardless of
+    // whether a keymap is available — if there's no keymap we fall back to
+    // Shift+Insert paste. This avoids creating a new XDG RemoteDesktop portal
+    // session on every PTT event.
+    {
+        let ei_state = daemon.ei_state.lock().await;
+        if let Some(ref state) = *ei_state {
+            if state.keyboard.is_alive() {
+                let last_serial: u32 = u32::MAX;
+                state.device.start_emulating(0, last_serial);
+
+                if state.keymap.is_null() {
+                    // Fall back to Shift+Insert paste (no keymap available).
+                    log::info!("ei: reusing cached context, Shift+Insert fallback");
+                    state.keyboard.key(KEY_LEFTSHIFT, ei::keyboard::KeyState::Press);
+                    state.keyboard.key(KEY_INSERT, ei::keyboard::KeyState::Press);
+                    state.device.frame(last_serial, 0);
+                    state.keyboard.key(KEY_INSERT, ei::keyboard::KeyState::Released);
+                    state.keyboard.key(KEY_LEFTSHIFT, ei::keyboard::KeyState::Released);
+                    state.device.frame(last_serial, 0);
+                } else {
+                    log::info!("ei: reusing cached context for typing ({} chars)", text.len());
+                    for ch in text.chars() {
+                        let (code, shift) = match char_to_evdev(ch) {
+                            Some(x) => x,
+                            None => {
+                                if !state.keymap.is_null() {
+                                    match unsafe { find_key_for_char_xkb(state.keymap, ch) } {
+                                        Some(x) => x,
+                                        None => {
+                                            log::warn!("ei: cannot type U+{:04X}, skipping", ch as u32);
+                                            continue;
+                                        }
+                                    }
+                                } else {
+                                    log::warn!("ei: U+{:04X} not in ASCII table and no keymap, skipping", ch as u32);
+                                    continue;
+                                }
+                            }
+                        };
+
+                        if shift {
+                            state.keyboard.key(KEY_LEFTSHIFT, ei::keyboard::KeyState::Press);
+                        }
+                        state.keyboard.key(code, ei::keyboard::KeyState::Press);
+                        state.device.frame(last_serial, 0);
+
+                        state.keyboard.key(code, ei::keyboard::KeyState::Released);
+                        if shift {
+                            state.keyboard.key(KEY_LEFTSHIFT, ei::keyboard::KeyState::Released);
+                        }
+                        state.device.frame(last_serial, 0);
+                    }
+                }
+
+                state.device.stop_emulating(last_serial);
+                if let Err(e) = state.context.flush() {
+                    log::warn!("ei: flush failed on cached context, will recreate: {e}");
+                    drop(ei_state);
+                    *daemon.ei_state.lock().await = None;
+                    return Err(anyhow!("ei flush: {e}"));
+                }
+                log::info!("ei: done with cached context");
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                return Ok(());
+            }
+            log::info!("ei: cached context no longer alive, recreating");
+        }
+    }
+
+    // Create a new EI context — try env socket first, then XDG RemoteDesktop portal.
+    let context = if let Some(ctx) = ei::Context::connect_to_env().ok().flatten() {
+        log::info!("ei: connected via LIBEI_SOCKET");
+        ctx
     } else {
-        &[Selection::Primary]
-    }
-}
+        log::info!("ei: no LIBEI_SOCKET, requesting portal access");
+        connect_eis_via_portal(&daemon.config.permission_lifetime).await?
+    };
 
-#[cfg(target_os = "linux")]
-async fn wl_copy(text: &str, also_clipboard: bool) -> Result<()> {
-    for selection in selections_to_write(also_clipboard) {
-        let mut cmd = Command::new("wl-copy");
-        if *selection == Selection::Primary {
-            cmd.arg("--primary");
-        }
-        let mut child = cmd
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("spawn wl-copy")?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(text.as_bytes()).await?;
-        }
-        child.wait().await?;
+    // Blocking handshake on a dedicated thread.
+    let context =
+        tokio::task::spawn_blocking(move || -> Result<ei::Context> {
+            let _handshake = context.handshake();
+            context.flush().map_err(|e| anyhow!("ei flush handshake: {e}"))?;
+
+            loop {
+                context.read().map_err(|e| anyhow!("ei read handshake: {e}"))?;
+                while let Some(result) = context.pending_event() {
+                    if let reis::PendingRequestResult::Request(ei::Event::Handshake(hs, ev)) =
+                        result
+                    {
+                        match ev {
+                            ei::handshake::Event::HandshakeVersion { .. } => {
+                                hs.handshake_version(1);
+                                hs.name("utter");
+                                hs.context_type(ei::handshake::ContextType::Sender);
+                                for &(iface, ver) in &[
+                                    ("ei_callback", 1),
+                                    ("ei_connection", 1),
+                                    ("ei_seat", 1),
+                                    ("ei_device", 1),
+                                    ("ei_pingpong", 1),
+                                    ("ei_keyboard", 1),
+                                ] {
+                                    hs.interface_version(iface, ver);
+                                }
+                                hs.finish();
+                                context.flush().map_err(|e| anyhow!("ei flush hs finish: {e}"))?;
+                            }
+                            ei::handshake::Event::Connection { .. } => {
+                                return Ok(context);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|e| anyhow!("ei handshake task: {e}"))??;
+
+    // Discover devices — seat → bind → device → keyboard.
+    #[derive(Default)]
+    struct SeatData {
+        caps: HashMap<String, u64>,
     }
+    #[derive(Default)]
+    struct DevData {
+        keyboard: Option<ei::Keyboard>,
+        resumed: bool,
+    }
+
+    let mut seats: HashMap<ei::Seat, SeatData> = HashMap::new();
+    let mut devices: HashMap<ei::Device, DevData> = HashMap::new();
+    let last_serial: u32 = u32::MAX;
+    let mut found_keyboard = false;
+    let mut keymap_fd: Option<std::os::unix::io::OwnedFd> = None;
+
+    for _ in 0..200 {
+        context.read().map_err(|e| anyhow!("ei read devices: {e}"))?;
+
+        while let Some(result) = context.pending_event() {
+            let request = match result {
+                reis::PendingRequestResult::Request(r) => r,
+                _ => continue,
+            };
+            match request {
+                ei::Event::Connection(_, ei::connection::Event::Ping { ping }) => {
+                    ping.done(0);
+                }
+                ei::Event::Seat(seat, ev) => {
+                    let data = seats.entry(seat.clone()).or_default();
+                    match ev {
+                        ei::seat::Event::Capability { mask, interface } => {
+                            data.caps.insert(interface.to_owned(), mask);
+                        }
+                        ei::seat::Event::Done => {
+                            if let Some(&mask) = data.caps.get("ei_keyboard") {
+                                log::info!("ei: binding seat to keyboard (mask={mask})");
+                                seat.bind(mask);
+                                context.flush().map_err(|e| anyhow!("ei flush bind: {e}"))?;
+                            }
+                        }
+                        ei::seat::Event::Device { device } => {
+                            devices.insert(device, DevData::default());
+                        }
+                        _ => {}
+                    }
+                }
+                ei::Event::Device(device, ev) => {
+                    let data = devices.entry(device).or_default();
+                    match ev {
+                        ei::device::Event::Interface { object } => {
+                            if object.interface() == "ei_keyboard" {
+                                if let Some(kb) = object.downcast::<ei::Keyboard>() {
+                                    data.keyboard = Some(kb);
+                                }
+                            }
+                        }
+                        ei::device::Event::Resumed { .. } => {
+                            data.resumed = true;
+                            if data.keyboard.is_some() {
+                                found_keyboard = true;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                ei::Event::Keyboard(_kb, ev) => {
+                    if let ei::keyboard::Event::Keymap { keymap: fd, .. } = ev {
+                        log::info!("ei: received keymap from compositor");
+                        keymap_fd = Some(fd);
+                    }
+                }
+                _ => {}
+            }
+        }
+        context.flush().map_err(|e| anyhow!("ei flush devices: {e}"))?;
+        if found_keyboard {
+            break;
+        }
+    }
+
+    if !found_keyboard {
+        return Err(anyhow!("ei: no keyboard device found after scanning events"));
+    }
+
+    let mut found_device = None;
+    let mut found_keyboard_obj = None;
+    for (device, data) in &devices {
+        if let (Some(keyboard), true) = (&data.keyboard, data.resumed) {
+            found_device = Some(device.clone());
+            found_keyboard_obj = Some(keyboard.clone());
+            break;
+        }
+    }
+
+    let (device, keyboard) = match (found_device, found_keyboard_obj) {
+        (Some(d), Some(k)) => (d, k),
+        _ => return Err(anyhow!("ei: keyboard found but no events sent")),
+    };
+
+    // Parse the keymap from the compositor.
+    let (xkb_keymap, xkb_state) = match keymap_fd {
+        Some(fd) => match unsafe { parse_keymap_from_fd(fd) } {
+            Ok((km, st)) => (SendPtr(km), SendPtr(st)),
+            Err(e) => {
+                log::warn!("ei: keymap parse failed, falling back to no keymap: {e:#}");
+                (SendPtr(std::ptr::null_mut()), SendPtr(std::ptr::null_mut()))
+            }
+        },
+        None => {
+            log::warn!("ei: no keymap received from compositor");
+            (SendPtr(std::ptr::null_mut()), SendPtr(std::ptr::null_mut()))
+        }
+    };
+
+    // Cache the context for reuse.
+    *daemon.ei_state.lock().await = Some(EiState {
+        context: context.clone(),
+        device: device.clone(),
+        keyboard: keyboard.clone(),
+        keymap: xkb_keymap.0,
+        xkb_state: xkb_state.0,
+    });
+
+    if xkb_keymap.0.is_null() {
+        // No keymap — fall back to Shift+Insert paste.
+        log::warn!("ei: no keymap available, falling back to Shift+Insert");
+        device.start_emulating(0, last_serial);
+
+        keyboard.key(KEY_LEFTSHIFT, ei::keyboard::KeyState::Press);
+        keyboard.key(110, ei::keyboard::KeyState::Press); // KEY_INSERT
+        device.frame(last_serial, 0);
+
+        keyboard.key(110, ei::keyboard::KeyState::Released);
+        keyboard.key(KEY_LEFTSHIFT, ei::keyboard::KeyState::Released);
+        device.frame(last_serial, 0);
+
+        device.stop_emulating(last_serial);
+        context.flush().map_err(|e| anyhow!("ei flush key events: {e}"))?;
+        log::info!("ei: sent Shift+Insert via virtual keyboard (no keymap fallback)");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        return Ok(());
+    }
+
+    // Type each character using the ASCII→evdev lookup table, falling back
+    // to the XKB keymap for non-ASCII characters.
+    device.start_emulating(0, last_serial);
+
+    for ch in text.chars() {
+        // First try the fast direct evdev table.
+        let (code, shift) = match char_to_evdev(ch) {
+            Some(x) => x,
+            None => {
+                // Fallback: use XKB keymap for non-ASCII chars.
+                if !xkb_keymap.0.is_null() {
+                    match unsafe { find_key_for_char_xkb(xkb_keymap.0, ch) } {
+                        Some(x) => x,
+                        None => {
+                            log::warn!("ei: cannot type U+{:04X}, skipping", ch as u32);
+                            continue;
+                        }
+                    }
+                } else {
+                    log::warn!("ei: U+{:04X} not in ASCII table and no keymap, skipping", ch as u32);
+                    continue;
+                }
+            }
+        };
+
+        if shift {
+            keyboard.key(KEY_LEFTSHIFT, ei::keyboard::KeyState::Press);
+        }
+        keyboard.key(code, ei::keyboard::KeyState::Press);
+        device.frame(last_serial, 0);
+
+        keyboard.key(code, ei::keyboard::KeyState::Released);
+        if shift {
+            keyboard.key(KEY_LEFTSHIFT, ei::keyboard::KeyState::Released);
+        }
+        device.frame(last_serial, 0);
+    }
+
+    device.stop_emulating(last_serial);
+    context.flush().map_err(|e| anyhow!("ei flush key events: {e}"))?;
+    log::info!("ei: typed {} chars via virtual keyboard", text.len());
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
     Ok(())
 }
 
+/// Connect to the EI server via the XDG RemoteDesktop portal.
+/// Persists the restore token to `~/.config/utter/ei_token` so the
+/// permissions dialog only appears once.
 #[cfg(target_os = "linux")]
-async fn ydotool_keys(codes: &[&str]) -> Result<()> {
-    // Keep ydotool's documented 12ms default between key events. With 0,
-    // modifier chords (Shift+Insert, Ctrl+V, Ctrl+Shift+V) raced: on a
-    // busy compositor the main key could be interpreted before the
-    // modifier state propagated, so apps saw a bare Insert / V keystroke
-    // and pasted nothing. 3-5 events * 12ms = ~40-60ms total, which is
-    // imperceptible.
-    let output = Command::new("ydotool")
-        .args(["key", "--key-delay", "12"])
-        .args(codes)
-        .output()
-        .await?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("ydotool key: {}", stderr.trim()));
+async fn connect_eis_via_portal(permission_lifetime: &str) -> Result<reis::ei::Context> {
+    use ashpd::desktop::remote_desktop::{
+        ConnectToEISOptions, DeviceType, RemoteDesktop, SelectDevicesOptions, StartOptions,
+    };
+    use ashpd::desktop::{CreateSessionOptions, PersistMode};
+    use enumflags2::BitFlags;
+    use reis::ei;
+    use std::os::unix::net::UnixStream;
+
+    let token_path = dirs::config_dir()
+        .context("no config dir")?
+        .join("utter/ei_token");
+
+    let saved_token = std::fs::read_to_string(&token_path).ok();
+
+    let remote_desktop = RemoteDesktop::new()
+        .await
+        .context("ei: create RemoteDesktop proxy")?;
+
+    let session = remote_desktop
+        .create_session(CreateSessionOptions::default())
+        .await
+        .context("ei: create session")?;
+
+    let persist_mode = match permission_lifetime {
+        "session" => PersistMode::Application,
+        _ => PersistMode::ExplicitlyRevoked,
+    };
+
+    let mut options = SelectDevicesOptions::default()
+        .set_devices(BitFlags::from(DeviceType::Keyboard))
+        .set_persist_mode(persist_mode);
+
+    if let Some(ref token) = saved_token {
+        options = options.set_restore_token(token.as_str());
+        log::info!("ei: using saved restore token");
     }
-    Ok(())
+
+    remote_desktop
+        .select_devices(&session, options)
+        .await
+        .context("ei: select devices")?;
+
+    let selected = remote_desktop
+        .start(&session, None, StartOptions::default())
+        .await
+        .context("ei: start session")?
+        .response()
+        .context("ei: start response")?;
+
+    // Persist the new restore token for next launch.
+    if let Some(token) = selected.restore_token() {
+        if let Some(parent) = token_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&token_path, token) {
+            log::warn!("ei: failed to save restore token: {e:#}");
+        } else {
+            log::info!("ei: saved restore token to {}", token_path.display());
+        }
+    }
+
+    let fd = remote_desktop
+        .connect_to_eis(&session, ConnectToEISOptions::default())
+        .await
+        .context("ei: connect to EIS")?;
+
+    let stream = UnixStream::from(fd);
+    ei::Context::new(stream).context("ei: create context from portal fd")
 }
 
 /// Canonical short name for an evdev keycode. Used for pretty display in
@@ -1194,8 +1587,7 @@ fn run_systemctl_user(args: &[&str]) -> std::io::Result<std::process::ExitStatus
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{
-        canonical_name_for, cleanup_transcription, parse_key_name, selections_to_write,
-        Selection,
+        canonical_name_for, cleanup_transcription, parse_key_name,
     };
 
     #[test]
@@ -1340,19 +1732,6 @@ mod tests {
         // code instead.
         assert!(canonical_name_for(evdev::KeyCode::KEY_A).is_none());
         assert!(canonical_name_for(evdev::KeyCode::KEY_SPACE).is_none());
-    }
-
-    #[test]
-    fn selections_default_to_primary_only() {
-        assert_eq!(selections_to_write(false), &[Selection::Primary]);
-    }
-
-    #[test]
-    fn selections_write_both_when_also_clipboard() {
-        assert_eq!(
-            selections_to_write(true),
-            &[Selection::Primary, Selection::Clipboard]
-        );
     }
 
 }

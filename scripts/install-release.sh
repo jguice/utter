@@ -12,8 +12,8 @@
 #   1. Detect distro (Fedora / Debian / Ubuntu family) and CPU arch.
 #   2. Fetch the latest utter release from GitHub.
 #   3. Download the right .rpm or .deb for your distro+arch.
-#   4. Install it via dnf / apt (pulls in ydotool, alsa-utils, wl-clipboard,
-#      libnotify as deps; drops udev + systemd files; enables ydotool).
+#   4. Install it via dnf / apt (pulls in libnotify as a dep;
+#      drops udev + systemd files).
 #   5. Download the Parakeet model (~640 MB) as your user.
 #   6. Start utter-daemon and utter-watcher in your current session.
 

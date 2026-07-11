@@ -14,8 +14,6 @@ if command -v systemctl >/dev/null 2>&1; then
                 'systemctl --user stop utter-watcher utter-daemon' 2>/dev/null || true
         fi
     done
-
-    # Don't touch ydotool — the user may want it for other tools.
 fi
 
 exit 0

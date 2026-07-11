@@ -15,11 +15,7 @@ license: MIT
 section: utils
 priority: optional
 
-depends:
-  - ydotool
-  - alsa-utils
-  - wl-clipboard
-  - libnotify-bin | libnotify
+depends: []
 rpm:
   group: Applications/System
   summary: Local push-to-talk voice dictation for Linux
@@ -49,11 +45,6 @@ contents:
     file_info:
       mode: 0644
 
-  - src: ./systemd/ydotool-owner.conf
-    dst: /etc/systemd/system/ydotool.service.d/owner.conf
-    file_info:
-      mode: 0644
-
   - src: ../scripts/download-model.sh
     dst: /usr/share/utter/download-model.sh
     file_info:
@@ -75,17 +66,3 @@ scripts:
   postinstall: ./scripts/postinstall.sh
   preremove: ./scripts/preremove.sh
   postremove: ./scripts/postremove.sh
-
-overrides:
-  deb:
-    depends:
-      - ydotool
-      - alsa-utils
-      - wl-clipboard
-      - libnotify-bin
-  rpm:
-    depends:
-      - ydotool
-      - alsa-utils
-      - wl-clipboard
-      - libnotify

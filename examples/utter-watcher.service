@@ -8,8 +8,8 @@ PartOf=graphical-session.target
 Type=simple
 # The key comes from ~/.config/utter/config.toml (field `key`, default
 # `rightmeta`). `utter set-key` updates that file. Pass `--key <name>`
-# explicitly here to override the config. The user MUST be in the
-# `input` group for /dev/input/event* to be readable.
+# explicitly here to override the config. The 90-utter.rules udev rule
+# grants read access to keyboard event devices via uaccess.
 ExecStart=%h/.cargo/bin/utter watch
 Restart=on-failure
 RestartSec=2
