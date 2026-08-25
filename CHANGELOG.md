@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/jguice/utter/compare/v0.3.0...v0.4.0) (2026-08-25)
+
+
+### Features
+
+* add custom dictionary corrections ([#10](https://github.com/jguice/utter/issues/10)) ([b9e12c0](https://github.com/jguice/utter/commit/b9e12c0df2907b6b9bb0b3292d4f8c4885041c86))
+
 ## [0.3.0](https://github.com/jguice/utter/compare/v0.2.0...v0.3.0) (2026-04-24)
 
 
