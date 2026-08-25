@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/jguice/utter/compare/v0.4.0...v0.4.1) (2026-08-25)
+
+
+### Bug Fixes
+
+* add ydotoold dep and ydotool.service to deb packaging ([#9](https://github.com/jguice/utter/issues/9)) ([170e4fa](https://github.com/jguice/utter/commit/170e4faddad08b515697f8a408afd8cf54d3c948))
+
 ## [0.4.0](https://github.com/jguice/utter/compare/v0.3.0...v0.4.0) (2026-08-25)
 
 
