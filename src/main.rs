@@ -19,6 +19,8 @@ use transcribe_rs::onnx::Quantization;
 
 mod config;
 use config::Config;
+mod dictionary;
+use dictionary::{Dictionary, DictionaryStore};
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -83,6 +85,37 @@ enum Cmd {
         #[arg(long, default_value = "20")]
         timeout: u64,
     },
+    /// Manage custom dictionary corrections.
+    Dictionary {
+        #[command(subcommand)]
+        cmd: DictionaryCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum DictionaryCmd {
+    /// Add a desired output term and heard-as replacement phrases.
+    #[command(
+        override_usage = "utter dictionary add TERM --replace HEARD_AS [--replace HEARD_AS ...]",
+        override_help = "Add a dictionary correction.\n\nUsage:\n  utter dictionary add TERM --replace HEARD_AS [--replace HEARD_AS ...]\n\nArguments:\n  TERM       Exact text Utter should paste.\n  HEARD_AS   Phrase Utter currently transcribes. Repeat --replace for a list.\n\nExamples:\n  utter dictionary add LUFS --replace luffs\n  utter dictionary add Chikin --replace Chicken --replace \"check in\"\n\nOptions:\n  -h, --help  Print help"
+    )]
+    Add {
+        /// Desired output text, with exact casing/punctuation to paste.
+        #[arg(value_name = "TERM")]
+        term: String,
+        /// Misheard phrase Utter should rewrite to TERM. Repeat for multiple triggers.
+        #[arg(long = "replace", value_name = "HEARD_AS")]
+        replacements: Vec<String>,
+    },
+    /// Remove a dictionary term and all of its replacement phrases.
+    Remove {
+        /// Desired output term to remove.
+        term: String,
+    },
+    /// List dictionary terms and replacement phrases.
+    List,
+    /// Print the dictionary file path.
+    Path,
 }
 
 #[cfg(target_os = "linux")]
@@ -144,6 +177,69 @@ async fn dispatch(cli: Cli) -> Result<()> {
         }
         Some(Cmd::Watch { key }) => run_watcher(key.as_deref()).await,
         Some(Cmd::SetKey { dry_run, timeout }) => run_set_key(dry_run, timeout).await,
+        Some(Cmd::Dictionary { cmd }) => run_dictionary(cmd),
+    }
+}
+
+fn run_dictionary(cmd: DictionaryCmd) -> Result<()> {
+    let path = Dictionary::default_path()?;
+    match cmd {
+        DictionaryCmd::Add { term, replacements } => {
+            if replacements.is_empty() {
+                return Err(anyhow!(
+                    "dictionary add needs at least one --replace phrase.\n\nTERM is the exact text to paste. --replace is what Utter currently transcribes.\nExample: utter dictionary add LUFS --replace luffs\nMultiple phrases: utter dictionary add AcmeCloud --replace \"acme cloud\" --replace \"acme clout\""
+                ));
+            }
+            let mut dictionary = Dictionary::load_from(&path)?;
+            dictionary.add_term(&term)?;
+            let mut added_replacements = 0usize;
+            for replacement in replacements {
+                if dictionary.add_replacement(&term, &replacement)? {
+                    added_replacements += 1;
+                }
+            }
+            dictionary.normalize();
+            dictionary.save_atomic(&path)?;
+
+            if added_replacements == 0 {
+                println!("No changes; `{term}` already has those replacements.");
+            } else {
+                println!(
+                    "Saved `{term}` with {added_replacements} replacement{} to {}.",
+                    if added_replacements == 1 { "" } else { "s" },
+                    path.display()
+                );
+            }
+            Ok(())
+        }
+        DictionaryCmd::Remove { term } => {
+            let mut dictionary = Dictionary::load_from(&path)?;
+            if !dictionary.remove_term(&term) {
+                return Err(anyhow!("dictionary term not found: {term}"));
+            }
+            dictionary.save_atomic(&path)?;
+            println!("Removed `{term}` from {}.", path.display());
+            Ok(())
+        }
+        DictionaryCmd::List => {
+            let dictionary = Dictionary::load_from(&path)?;
+            if dictionary.entries.is_empty() {
+                println!("Dictionary is empty ({})", path.display());
+                return Ok(());
+            }
+            for entry in dictionary.entries {
+                if entry.replace.is_empty() {
+                    println!("{}  (no replacements)", entry.term);
+                } else {
+                    println!("{}  <-  {}", entry.term, entry.replace.join(" | "));
+                }
+            }
+            Ok(())
+        }
+        DictionaryCmd::Path => {
+            println!("{}", path.display());
+            Ok(())
+        }
     }
 }
 
@@ -272,6 +368,7 @@ struct Daemon {
     model: Arc<Mutex<ParakeetModel>>,
     state: Mutex<State>,
     config: Config,
+    dictionary: Mutex<DictionaryStore>,
 }
 
 async fn run_daemon(model_override: Option<PathBuf>) -> Result<()> {
@@ -279,10 +376,11 @@ async fn run_daemon(model_override: Option<PathBuf>) -> Result<()> {
     let env = config::utter_env_snapshot();
     let cfg = Config::load_or_migrate(&config_path, &env)?;
     log::info!(
-        "config loaded from {} (auto_paste={}, write_clipboard={}, filter_filler_words={})",
+        "config loaded from {} (auto_paste={}, write_clipboard={}, restore_clipboard_after_paste={}, filter_filler_words={})",
         config_path.display(),
         cfg.auto_paste,
         cfg.write_clipboard,
+        cfg.restore_clipboard_after_paste,
         cfg.filter_filler_words,
     );
 
@@ -315,6 +413,7 @@ async fn run_daemon(model_override: Option<PathBuf>) -> Result<()> {
         model: Arc::new(Mutex::new(model)),
         state: Mutex::new(State::Idle),
         config: cfg,
+        dictionary: Mutex::new(DictionaryStore::new(Dictionary::default_path()?)),
     });
 
     let sock_cleanup = socket.clone();
@@ -448,13 +547,18 @@ async fn stop_and_transcribe(daemon: &Daemon) -> Result<String> {
     } else {
         text.trim().to_string()
     };
+    let corrected = {
+        let mut store = daemon.dictionary.lock().await;
+        store.reload_if_changed();
+        store.dictionary().apply_replacements(&cleaned)
+    };
 
     // Append a trailing space so consecutive dictations don't smash together
     // (Parakeet ends sentences with "." but no whitespace).
-    let out = if cleaned.is_empty() {
+    let out = if corrected.is_empty() {
         String::new()
     } else {
-        format!("{cleaned} ")
+        format!("{corrected} ")
     };
     if !out.is_empty() {
         emit_text(&out, &daemon.config).await;
@@ -622,7 +726,12 @@ async fn emit_text(text: &str, cfg: &Config) {
 #[cfg(target_os = "macos")]
 async fn emit_text(text: &str, cfg: &Config) {
     let t0 = Instant::now();
-    log::info!("emit: start (len={}, auto_paste={})", text.len(), cfg.auto_paste);
+    log::info!(
+        "emit: start (len={}, auto_paste={}, restore_clipboard_after_paste={})",
+        text.len(),
+        cfg.auto_paste,
+        cfg.restore_clipboard_after_paste
+    );
     if let Err(e) = macos::emit_text(text, cfg).await {
         log::warn!("emit: {e:#}");
     }

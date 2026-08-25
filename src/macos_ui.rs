@@ -69,6 +69,11 @@ declare_class!(
             flip_config_flag("auto_paste", |c| c.auto_paste, |c, v| c.with_auto_paste(v), sender);
         }
 
+        #[method(toggleRestoreClipboardAfterPaste:)]
+        fn toggle_restore_clipboard_after_paste(&self, sender: Option<&AnyObject>) {
+            flip_config_flag("restore_clipboard_after_paste", |c| c.restore_clipboard_after_paste, |c, v| c.with_restore_clipboard_after_paste(v), sender);
+        }
+
         #[method(toggleFilterFillerWords:)]
         fn toggle_filter_filler_words(&self, sender: Option<&AnyObject>) {
             flip_config_flag("filter_filler_words", |c| c.filter_filler_words, |c, v| c.with_filter_filler_words(v), sender);
@@ -137,7 +142,7 @@ pub fn run_status_bar_app(
             // (SF Symbols require macOS 11+; utter already requires 13).
             let symbol_name = NSString::from_str("waveform.circle.fill");
             let a11y = NSString::from_str("utter");
-            let icon: Option<Retained<NSImage>> = unsafe {
+            let icon: Option<Retained<NSImage>> = {
                 msg_send_id![
                     objc2::class!(NSImage),
                     imageWithSystemSymbolName: &*symbol_name,
@@ -153,7 +158,7 @@ pub fn run_status_bar_app(
                 // 20pt + Regular weight visually matches adjacent system
                 // menu bar icons. setSize alone isn't enough; SF Symbols
                 // need a point-size configuration to actually render larger.
-                let config: Option<Retained<objc2::runtime::AnyObject>> = unsafe {
+                let config: Option<Retained<objc2::runtime::AnyObject>> = {
                     msg_send_id![
                         objc2::class!(NSImageSymbolConfiguration),
                         configurationWithPointSize: 18.0 as CGFloat,
@@ -161,7 +166,7 @@ pub fn run_status_bar_app(
                     ]
                 };
                 if let Some(config) = config {
-                    let sized: Option<Retained<NSImage>> = unsafe {
+                    let sized: Option<Retained<NSImage>> = {
                         msg_send_id![&*icon, imageWithSymbolConfiguration: &*config]
                     };
                     if let Some(sized) = sized {
@@ -192,7 +197,7 @@ pub fn run_status_bar_app(
         // so we leak this single Retained at the end so the target outlives
         // the menu items that point at it.
         let target = UtterMenuTarget::new(mtm);
-        let target_ref: &AnyObject = &*target;
+        let target_ref: &AnyObject = &target;
 
         // Capture env once to compute env-override greyout per toggle.
         let env = crate::config::utter_env_snapshot();
@@ -212,11 +217,13 @@ pub fn run_status_bar_app(
             cfg.auto_paste,
             env.contains_key("UTTER_AUTO_PASTE"),
         );
-        // write_clipboard is intentionally not exposed on macOS yet: macOS
-        // has only one pasteboard, and the auto-paste flow needs text on
-        // it to do Cmd+V. A future PR will implement true "leave the
-        // clipboard untouched" via snapshot-and-restore around the paste,
-        // and re-add this toggle.
+        add_toggle(
+            &menu, mtm, target_ref,
+            "Restore clipboard after paste",
+            sel!(toggleRestoreClipboardAfterPaste:),
+            cfg.restore_clipboard_after_paste,
+            env.contains_key("UTTER_RESTORE_CLIPBOARD_AFTER_PASTE"),
+        );
         add_toggle(
             &menu, mtm, target_ref,
             "Filter filler words",
@@ -379,6 +386,14 @@ fn notify_restart(flag_name: &str, new_value: bool) {
         ("auto_paste", false) => (
             "utter: auto-paste disabled".to_string(),
             "Dictations are written to the clipboard; paste them yourself with Cmd+V. Restart utter to apply.".to_string(),
+        ),
+        ("restore_clipboard_after_paste", true) => (
+            "utter: clipboard restore enabled".to_string(),
+            "After auto-paste, utter will restore the previous clipboard contents. Restart utter to apply.".to_string(),
+        ),
+        ("restore_clipboard_after_paste", false) => (
+            "utter: clipboard restore disabled".to_string(),
+            "After auto-paste, dictated text will stay in the clipboard. Restart utter to apply.".to_string(),
         ),
         ("filter_filler_words", true) => (
             "utter: filler-word filtering enabled".to_string(),

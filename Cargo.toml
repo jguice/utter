@@ -17,6 +17,7 @@ log = "0.4"
 nix = { version = "0.29", features = ["signal"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+unicode-segmentation = "1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = { version = "0.13", features = ["tokio"] }
@@ -59,7 +60,7 @@ objc2-app-kit = { version = "0.2", features = [
     "NSBox",
     "NSUserInterfaceLayout",
 ] }
-objc2-foundation = { version = "0.2", features = ["NSString", "NSArray", "NSThread", "NSTimer", "NSDate", "NSGeometry"] }
+objc2-foundation = { version = "0.2", features = ["NSString", "NSArray", "NSData", "NSThread", "NSTimer", "NSDate", "NSGeometry"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -20,6 +20,9 @@ pub struct Config {
     /// Also write dictations to the regular clipboard alongside the
     /// primary selection. Default leaves the regular clipboard untouched.
     pub write_clipboard: bool,
+    /// On macOS, restore the previous pasteboard contents after utter
+    /// writes dictation text and synthesizes Cmd+V. Ignored on Linux.
+    pub restore_clipboard_after_paste: bool,
     /// Drop filler words (uh, um, er, ah, erm, hmm) and collapse stuttered
     /// repetitions (`I I I think` → `I think`, `wh wh wh what` → `what`)
     /// before emitting text.
@@ -32,6 +35,7 @@ impl Default for Config {
             key: "rightmeta".to_string(),
             auto_paste: true,
             write_clipboard: false,
+            restore_clipboard_after_paste: true,
             filter_filler_words: true,
         }
     }
@@ -54,7 +58,8 @@ impl Config {
         format!(
             "# utter configuration. Managed by `utter set-key` and edited by hand.\n\
              # Env vars (UTTER_KEY, UTTER_AUTO_PASTE, UTTER_WRITE_CLIPBOARD,\n\
-             # UTTER_FILTER_FILLER_WORDS) override any value set here.\n\
+             # UTTER_RESTORE_CLIPBOARD_AFTER_PASTE, UTTER_FILTER_FILLER_WORDS)\n\
+             # override any value set here.\n\
              \n\
              # PTT key: named alias (rightmeta, capslock, f13, ...) or numeric evdev\n\
              # keycode as a string.\n\
@@ -67,12 +72,17 @@ impl Config {
              # users). Default leaves the regular clipboard untouched.\n\
              write_clipboard = {write_clipboard}\n\
              \n\
+             # macOS: restore the previous clipboard contents after auto-pasting.\n\
+             # false = leave dictated text in the clipboard after paste.\n\
+             restore_clipboard_after_paste = {restore_clipboard_after_paste}\n\
+             \n\
              # Drop fillers (uh, um, er, ah, erm, hmm) and collapse stuttered\n\
              # repetitions (`I I I think` → `I think`).\n\
              filter_filler_words = {filter_filler_words}\n",
             key = self.key,
             auto_paste = self.auto_paste,
             write_clipboard = self.write_clipboard,
+            restore_clipboard_after_paste = self.restore_clipboard_after_paste,
             filter_filler_words = self.filter_filler_words,
         )
     }
@@ -90,6 +100,11 @@ impl Config {
         if let Some(v) = env.get("UTTER_WRITE_CLIPBOARD") {
             self.write_clipboard =
                 parse_bool_env("UTTER_WRITE_CLIPBOARD", v).unwrap_or(self.write_clipboard);
+        }
+        if let Some(v) = env.get("UTTER_RESTORE_CLIPBOARD_AFTER_PASTE") {
+            self.restore_clipboard_after_paste =
+                parse_bool_env("UTTER_RESTORE_CLIPBOARD_AFTER_PASTE", v)
+                    .unwrap_or(self.restore_clipboard_after_paste);
         }
         if let Some(v) = env.get("UTTER_FILTER_FILLER_WORDS") {
             self.filter_filler_words =
@@ -135,11 +150,16 @@ impl Config {
     }
 
     // Used by Linux's wl_copy path indirectly via the field, and by tests.
-    // The macOS UI temporarily hides the toggle (no snapshot-and-restore
-    // around Cmd+V yet); kept available for the imminent follow-up PR.
     #[allow(dead_code)]
     pub fn with_write_clipboard(mut self, v: bool) -> Self {
         self.write_clipboard = v;
+        self
+    }
+
+    // Consumed by the macOS menu-bar toggle. Linux ignores the setting.
+    #[allow(dead_code)]
+    pub fn with_restore_clipboard_after_paste(mut self, v: bool) -> Self {
+        self.restore_clipboard_after_paste = v;
         self
     }
 
@@ -226,6 +246,10 @@ mod tests {
         assert_eq!(c.key, "rightmeta");
         assert!(c.auto_paste, "auto_paste on by default");
         assert!(!c.write_clipboard, "write_clipboard off by default — don't pollute");
+        assert!(
+            c.restore_clipboard_after_paste,
+            "restore_clipboard_after_paste on by default"
+        );
         assert!(c.filter_filler_words, "filter_filler_words on by default");
     }
 
@@ -235,6 +259,7 @@ mod tests {
             key: "capslock".to_string(),
             auto_paste: false,
             write_clipboard: true,
+            restore_clipboard_after_paste: false,
             filter_filler_words: false,
         };
         let text = original.to_toml();
@@ -249,6 +274,7 @@ mod tests {
         assert_eq!(c.key, "f13");
         assert!(c.auto_paste, "other fields default");
         assert!(!c.write_clipboard);
+        assert!(c.restore_clipboard_after_paste);
     }
 
     #[test]
@@ -282,12 +308,14 @@ mod tests {
             ("UTTER_KEY", "f13"),
             ("UTTER_AUTO_PASTE", "0"),
             ("UTTER_WRITE_CLIPBOARD", "1"),
+            ("UTTER_RESTORE_CLIPBOARD_AFTER_PASTE", "0"),
             ("UTTER_FILTER_FILLER_WORDS", "0"),
         ]);
         let c = base.with_env_overrides(&e);
         assert_eq!(c.key, "f13");
         assert!(!c.auto_paste);
         assert!(c.write_clipboard);
+        assert!(!c.restore_clipboard_after_paste);
         assert!(!c.filter_filler_words);
     }
 
@@ -297,6 +325,7 @@ mod tests {
             key: "capslock".to_string(),
             auto_paste: false,
             write_clipboard: true,
+            restore_clipboard_after_paste: false,
             filter_filler_words: false,
         };
         let c = base.clone().with_env_overrides(&env(&[("PATH", "/usr/bin")]));
@@ -308,9 +337,11 @@ mod tests {
         let c = Config::default().with_env_overrides(&env(&[
             ("UTTER_AUTO_PASTE", "false"),
             ("UTTER_WRITE_CLIPBOARD", "true"),
+            ("UTTER_RESTORE_CLIPBOARD_AFTER_PASTE", "false"),
         ]));
         assert!(!c.auto_paste);
         assert!(c.write_clipboard);
+        assert!(!c.restore_clipboard_after_paste);
     }
 
     #[test]
@@ -367,6 +398,7 @@ mod tests {
         let c = Config {
             auto_paste: false,
             write_clipboard: true,
+            restore_clipboard_after_paste: false,
             filter_filler_words: false,
             key: "rightmeta".to_string(),
         };
@@ -375,6 +407,10 @@ mod tests {
         // Other fields preserved.
         assert_eq!(updated.auto_paste, c.auto_paste);
         assert_eq!(updated.write_clipboard, c.write_clipboard);
+        assert_eq!(
+            updated.restore_clipboard_after_paste,
+            c.restore_clipboard_after_paste
+        );
         assert_eq!(updated.filter_filler_words, c.filter_filler_words);
     }
 
@@ -386,10 +422,12 @@ mod tests {
             .clone()
             .with_auto_paste(false)
             .with_write_clipboard(true)
+            .with_restore_clipboard_after_paste(false)
             .with_filter_filler_words(false);
 
         assert!(!flipped.auto_paste);
         assert!(flipped.write_clipboard);
+        assert!(!flipped.restore_clipboard_after_paste);
         assert!(!flipped.filter_filler_words);
         // Unrelated fields preserved.
         assert_eq!(flipped.key, base.key);

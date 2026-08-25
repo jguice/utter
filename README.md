@@ -32,7 +32,7 @@ Installs the matching `.rpm` / `.deb`, fetches the model, and starts the user se
 ## Docs
 
 - [Install](docs/INSTALL.md) — requirements, manual package install, from source, verify.
-- [Configuration](docs/CONFIGURATION.md) — `config.toml`, env vars, PTT-key aliases, recording indicator.
+- [Configuration](docs/CONFIGURATION.md) — `config.toml`, custom dictionary corrections, env vars, PTT-key aliases, recording indicator.
 - [Architecture](docs/ARCHITECTURE.md) — daemon/watcher on Linux, single-process on macOS.
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Uninstall](docs/UNINSTALL.md)

@@ -458,9 +458,85 @@ pub async fn stop_audio(capture: AudioCapture) -> Result<Vec<f32>> {
 // Pasteboard -> synthesize Cmd+V. No ydotool, no wl-copy, no subprocess.
 // Custom pasteboard type "com.utter.dictation" rides alongside plain text so
 // users who run Paste / Maccy / Alfred can configure their clipboard manager
-// to filter dictations out of history.
+// to filter dictations out of history. By default, auto-paste also snapshots
+// the previous pasteboard contents and restores them after Cmd+V.
 
 const UTTER_PASTEBOARD_TYPE: &str = "com.utter.dictation";
+
+struct PasteboardSnapshot {
+    entries: Vec<(objc2::rc::Retained<objc2_app_kit::NSPasteboardType>, Vec<u8>)>,
+}
+
+fn snapshot_pasteboard() -> Result<PasteboardSnapshot> {
+    use objc2_app_kit::NSPasteboard;
+
+    unsafe {
+        let pb = NSPasteboard::generalPasteboard();
+        let Some(types) = pb.types() else {
+            return Ok(PasteboardSnapshot { entries: Vec::new() });
+        };
+
+        let mut entries = Vec::new();
+        for index in 0..types.len() {
+            if let Some(data_type) = types.get_retained(index) {
+                if let Some(data) = pb.dataForType(&data_type) {
+                    entries.push((data_type, data.bytes().to_vec()));
+                }
+            }
+        }
+        Ok(PasteboardSnapshot { entries })
+    }
+}
+
+fn restore_pasteboard(snapshot: PasteboardSnapshot) -> Result<()> {
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::{NSArray, NSData, NSString};
+
+    unsafe {
+        let pb = NSPasteboard::generalPasteboard();
+        let custom_type = NSString::from_str(UTTER_PASTEBOARD_TYPE);
+        let still_holds_utter_text = pb
+            .types()
+            .map(|types| {
+                (0..types.len()).any(|index| {
+                    types
+                        .get(index)
+                        .map(|data_type| data_type.isEqualToString(&custom_type))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+
+        if !still_holds_utter_text {
+            log::warn!(
+                "pasteboard changed before restore; leaving current clipboard contents alone"
+            );
+            return Ok(());
+        }
+
+        pb.clearContents();
+        if snapshot.entries.is_empty() {
+            return Ok(());
+        }
+
+        let types = NSArray::from_vec(
+            snapshot
+                .entries
+                .iter()
+                .map(|(data_type, _)| data_type.clone())
+                .collect(),
+        );
+        pb.declareTypes_owner(&types, None);
+
+        for (data_type, bytes) in snapshot.entries {
+            let data = NSData::with_bytes(&bytes);
+            if !pb.setData_forType(Some(&data), &data_type) {
+                log::warn!("failed to restore one pasteboard data type");
+            }
+        }
+    }
+    Ok(())
+}
 
 fn write_pasteboard(text: &str) -> Result<()> {
     use objc2::rc::Retained;
@@ -535,10 +611,21 @@ pub async fn emit_text(text: &str, cfg: &Config) -> Result<()> {
     // reactor stays free. Each chunk is microseconds on Apple Silicon.
     let text = text.to_string();
     let auto_paste = cfg.auto_paste;
+    let restore_clipboard_after_paste = cfg.restore_clipboard_after_paste;
     tokio::task::spawn_blocking(move || -> Result<()> {
+        let snapshot = if auto_paste && restore_clipboard_after_paste {
+            Some(snapshot_pasteboard()?)
+        } else {
+            None
+        };
+
         write_pasteboard(&text)?;
         if auto_paste {
             synthesize_cmd_v()?;
+            if let Some(snapshot) = snapshot {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                restore_pasteboard(snapshot)?;
+            }
         }
         Ok(())
     })
@@ -1163,4 +1250,3 @@ pub async fn run_set_key(dry_run: bool, timeout_secs: u64) -> Result<()> {
     );
     Ok(())
 }
-
