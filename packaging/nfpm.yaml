@@ -54,6 +54,16 @@ contents:
     file_info:
       mode: 0644
 
+  # Ubuntu/Debian's ydotool & ydotoold packages ship the binaries but not a
+  # systemd unit, so the drop-in above has nothing to drop into. Ship a base
+  # ydotool.service ourselves on deb only — Fedora's ydotool package already
+  # provides one (we'd conflict if we shipped it on rpm too).
+  - src: ./systemd/ydotool.service
+    dst: /usr/lib/systemd/system/ydotool.service
+    file_info:
+      mode: 0644
+    packager: deb
+
   - src: ../scripts/download-model.sh
     dst: /usr/share/utter/download-model.sh
     file_info:
@@ -80,6 +90,7 @@ overrides:
   deb:
     depends:
       - ydotool
+      - ydotoold
       - alsa-utils
       - wl-clipboard
       - libnotify-bin
