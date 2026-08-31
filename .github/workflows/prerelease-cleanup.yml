@@ -1,0 +1,45 @@
+name: Prerelease Cleanup
+
+# Deletes the per-branch prerelease (and its tag) when a PR is closed,
+# whether merged or not. Pairs with prerelease.yml — without this the
+# Releases page would accumulate stale prereleases for old branches.
+
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    name: Delete prerelease for closed PR
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Compute prerelease tag
+        id: tag
+        env:
+          REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          # Same sanitization as prerelease.yml's compute step — must stay in lockstep.
+          SANITIZED=$(printf '%s' "$REF" \
+            | tr '[:upper:]' '[:lower:]' \
+            | tr -c 'a-z0-9.-' '-' \
+            | sed 's/-\{1,\}/-/g; s/^-//; s/-$//')
+          TAG="prerelease-${SANITIZED}"
+          printf 'tag=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Delete prerelease + tag (if present)
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "Deleting prerelease $TAG"
+            gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag
+          else
+            echo "No prerelease for $TAG (nothing to clean up)"
+          fi
