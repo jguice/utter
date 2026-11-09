@@ -157,7 +157,7 @@ jobs:
   macos-build:
     name: Build macOS arm64 (signed + notarized DMG)
     needs: test
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       APPLE_ID: ${{ secrets.APPLE_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
