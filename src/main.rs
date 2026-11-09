@@ -136,12 +136,23 @@ fn default_model_dir() -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
-fn fresh_wav_path() -> PathBuf {
+fn fresh_pcm_path() -> PathBuf {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("utter-{ts}.wav"))
+    std::env::temp_dir().join(format!("utter-{ts}.pcm"))
+}
+
+/// Decode raw S16_LE mono PCM into f32 samples, scaled the same way as
+/// `transcribe_rs::audio::read_wav_samples` (`s / i16::MAX`). A trailing odd
+/// byte (arecord killed mid-sample) is dropped.
+#[cfg(target_os = "linux")]
+fn decode_s16le(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(2)
+        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / i16::MAX as f32)
+        .collect()
 }
 
 fn main() -> Result<()> {
@@ -355,7 +366,7 @@ async fn send_command(cmd: &str) -> Result<()> {
 #[cfg(target_os = "linux")]
 enum State {
     Idle,
-    Recording { child: Child, wav_path: PathBuf },
+    Recording { child: Child, pcm_path: PathBuf },
 }
 
 #[cfg(target_os = "macos")]
@@ -495,17 +506,21 @@ async fn start_recording(daemon: &Daemon) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let wav_path = fresh_wav_path();
-        log::info!("recording to {}", wav_path.display());
+        // Raw PCM, not WAV: arecord 1.2.9 (Ubuntu 24.04) exits on SIGINT
+        // without rewriting the WAV header's length fields, leaving a file
+        // hound can't parse ("Failed to read enough bytes"). Raw has no
+        // header to finalize, so how arecord exits doesn't matter.
+        let pcm_path = fresh_pcm_path();
+        log::info!("recording to {}", pcm_path.display());
         let child = Command::new("arecord")
-            .args(["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "wav"])
-            .arg(&wav_path)
+            .args(["-q", "-f", "S16_LE", "-r", "16000", "-c", "1", "-t", "raw"])
+            .arg(&pcm_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
             .context("spawn arecord (is alsa-utils installed?)")?;
-        *state = State::Recording { child, wav_path };
+        *state = State::Recording { child, pcm_path };
     }
     #[cfg(target_os = "macos")]
     {
@@ -568,8 +583,8 @@ async fn stop_and_transcribe(daemon: &Daemon) -> Result<String> {
 
 #[cfg(target_os = "linux")]
 async fn obtain_samples(state: State) -> Result<Vec<f32>> {
-    let (mut child, wav_path) = match state {
-        State::Recording { child, wav_path } => (child, wav_path),
+    let (mut child, pcm_path) = match state {
+        State::Recording { child, pcm_path } => (child, pcm_path),
         State::Idle => return Err(anyhow!("not recording")),
     };
     if let Some(pid) = child.id() {
@@ -579,28 +594,22 @@ async fn obtain_samples(state: State) -> Result<Vec<f32>> {
     }
     let _ = child.wait().await;
 
-    // Empty WAVs mean arecord opened the device but never got audio frames —
-    // usually a PipeWire/ALSA "Cannot allocate memory" error on the source.
-    let wav_meta = tokio::fs::metadata(&wav_path).await.ok();
-    let wav_size = wav_meta.map(|m| m.len()).unwrap_or(0);
-    if wav_size <= 128 {
-        let _ = tokio::fs::remove_file(&wav_path).await;
+    // An empty file means arecord opened the device but never got audio
+    // frames — usually a PipeWire/ALSA "Cannot allocate memory" error on the
+    // source.
+    let bytes = tokio::fs::read(&pcm_path).await.unwrap_or_default();
+    let _ = tokio::fs::remove_file(&pcm_path).await;
+    let pcm_size = bytes.len();
+    if pcm_size <= 128 {
         return Err(anyhow!(
-            "no audio captured ({wav_size}B WAV). Check your mic with \
+            "no audio captured ({pcm_size}B PCM). Check your mic with \
              `wpctl status` and `journalctl --user -n 30 | grep spa.alsa`. \
              On Asahi, the built-in mic may fail with `set_hw_params: \
              Cannot allocate memory` — plug in a USB or 3.5mm headset mic."
         ));
     }
 
-    let samples = tokio::task::spawn_blocking({
-        let p = wav_path.clone();
-        move || transcribe_rs::audio::read_wav_samples(&p)
-    })
-    .await??;
-
-    let _ = tokio::fs::remove_file(&wav_path).await;
-    Ok(samples)
+    Ok(decode_s16le(&bytes))
 }
 
 #[cfg(target_os = "macos")]
@@ -1303,9 +1312,17 @@ fn run_systemctl_user(args: &[&str]) -> std::io::Result<std::process::ExitStatus
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{
-        canonical_name_for, cleanup_transcription, parse_key_name, selections_to_write,
-        Selection,
+        canonical_name_for, cleanup_transcription, decode_s16le, parse_key_name,
+        selections_to_write, Selection,
     };
+
+    #[test]
+    fn decodes_raw_s16le_pcm() {
+        let bytes = [0x00, 0x00, 0xff, 0x7f, 0x01, 0x80, 0x00, 0xc0, 0x42];
+        // 0, i16::MAX, -i16::MAX, -16384; trailing odd byte dropped.
+        assert_eq!(decode_s16le(&bytes), vec![0.0, 1.0, -1.0, -16384.0 / 32767.0]);
+        assert!(decode_s16le(&[]).is_empty());
+    }
 
     #[test]
     fn drops_fillers() {
