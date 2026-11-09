@@ -36,3 +36,55 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+  macos:
+    name: test + clippy (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-macos
+
+      - name: cargo test
+        run: cargo test --locked
+
+      - name: cargo clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  # Checks utter's assumptions about distro-packaged tools (ydotool syntax,
+  # systemd units) against the real packages. arm64 to match Asahi.
+  distro:
+    name: distro tools (${{ matrix.name }})
+    runs-on: ubuntu-24.04-arm
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 24.04
+            image: ubuntu:24.04
+            ydotool: "0.1"
+            install: >-
+              apt-get update &&
+              apt-get install -y --no-install-recommends
+              ydotool ydotoold systemd python3
+          - name: Fedora (Asahi)
+            image: fedora:latest
+            ydotool: "1"
+            install: dnf install -y ydotool systemd python3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install distro packages
+        run: ${{ matrix.install }}
+
+      - name: Run checks
+        run: scripts/ci/run-distro-checks.sh "${{ matrix.ydotool }}"
