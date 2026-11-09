@@ -835,35 +835,53 @@ async fn wl_copy(text: &str, also_clipboard: bool) -> Result<()> {
     Ok(())
 }
 
-/// True for ydotool 0.1.x (what Debian/Ubuntu ship), whose `key` takes
-/// named chords like `shift+insert`. 1.x takes raw `<keycode>:<pressed>`
-/// events instead; given those, 0.1.x falls back to typing the first
-/// character of each argument, so Shift+Insert came out as "4114".
+/// Classify `ydotool key --help` output: `Some(true)` for 0.1.x (what
+/// Debian/Ubuntu ship), whose `key` takes named chords like `shift+insert`;
+/// `Some(false)` for 1.x, which takes raw `<keycode>:<pressed>` events.
+/// Given 1.x-style events, 0.1.x types the first character of each
+/// argument, so Shift+Insert came out as "4114".
+///
+/// `None` when no help was printed: both versions exit before showing help
+/// if ydotoold is unreachable, so the answer is unknown.
 #[cfg(target_os = "linux")]
-fn is_legacy_ydotool_help(help: &str) -> bool {
-    help.contains("separated by plus")
+fn classify_ydotool_help(help: &str) -> Option<bool> {
+    if help.contains("separated by plus") {
+        Some(true)
+    } else if help.contains("Usage: key") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 #[cfg(target_os = "linux")]
 async fn ydotool_is_legacy() -> bool {
-    static LEGACY: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
-    *LEGACY
-        .get_or_init(|| async {
-            let help = Command::new("ydotool")
-                .args(["key", "--help"])
-                .output()
-                .await
-                .map(|o| {
-                    let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
-                    s.push_str(&String::from_utf8_lossy(&o.stderr));
-                    s
-                })
-                .unwrap_or_default();
-            let legacy = is_legacy_ydotool_help(&help);
-            log::info!("ydotool key syntax: {}", if legacy { "0.1.x" } else { "1.x" });
-            legacy
-        })
+    // Cached only once known, so a paste attempted while ydotoold is down
+    // doesn't pin the wrong syntax for the daemon's lifetime.
+    static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if let Some(&legacy) = LEGACY.get() {
+        return legacy;
+    }
+    let help = Command::new("ydotool")
+        .args(["key", "--help"])
+        .output()
         .await
+        .map(|o| {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            s
+        })
+        .unwrap_or_default();
+    match classify_ydotool_help(&help) {
+        Some(legacy) => {
+            log::info!("ydotool key syntax: {}", if legacy { "0.1.x" } else { "1.x" });
+            *LEGACY.get_or_init(|| legacy)
+        }
+        None => {
+            log::warn!("couldn't detect ydotool version (is ydotoold running?); assuming 1.x");
+            false
+        }
+    }
 }
 
 /// `ydotool key` arguments for Shift+Insert.
@@ -1340,7 +1358,7 @@ fn run_systemctl_user(args: &[&str]) -> std::io::Result<std::process::ExitStatus
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{
-        canonical_name_for, cleanup_transcription, is_legacy_ydotool_help, parse_key_name,
+        canonical_name_for, classify_ydotool_help, cleanup_transcription, parse_key_name,
         paste_key_args, selections_to_write, Selection,
     };
 
@@ -1349,9 +1367,11 @@ mod tests {
         let v01 = "Usage: key [--delay <ms>] ...\nEach key sequence can be any number of \
                    modifiers and keys, separated by plus (+)\n";
         let v1 = "Usage: key [OPTION]... [KEYCODES]...\nEmit key events.\n";
-        assert!(is_legacy_ydotool_help(v01));
-        assert!(!is_legacy_ydotool_help(v1));
-        assert!(!is_legacy_ydotool_help(""));
+        let no_daemon = "failed to connect socket `/tmp/.ydotool_socket': No such file\n";
+        assert_eq!(classify_ydotool_help(v01), Some(true));
+        assert_eq!(classify_ydotool_help(v1), Some(false));
+        assert_eq!(classify_ydotool_help(no_daemon), None);
+        assert_eq!(classify_ydotool_help(""), None);
         assert_eq!(paste_key_args(true).last(), Some(&"shift+insert"));
         assert!(paste_key_args(false).contains(&"110:1"));
     }
