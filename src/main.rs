@@ -714,7 +714,7 @@ async fn emit_text(text: &str, cfg: &Config) {
         if !matched {
             log::warn!("emit: primary never matched before paste — firing anyway");
         }
-        if let Err(e) = ydotool_keys(&["42:1", "110:1", "110:0", "42:0"]).await {
+        if let Err(e) = ydotool_paste().await {
             log::warn!("paste failed: {e:#}");
         }
         log::info!("emit: ydotool returned at +{:?}", t0.elapsed());
@@ -835,19 +835,74 @@ async fn wl_copy(text: &str, also_clipboard: bool) -> Result<()> {
     Ok(())
 }
 
+/// Classify `ydotool key --help` output: `Some(true)` for 0.1.x (what
+/// Debian/Ubuntu ship), whose `key` takes named chords like `shift+insert`;
+/// `Some(false)` for 1.x, which takes raw `<keycode>:<pressed>` events.
+/// Given 1.x-style events, 0.1.x types the first character of each
+/// argument, so Shift+Insert came out as "4114".
+///
+/// `None` when no help was printed: both versions exit before showing help
+/// if ydotoold is unreachable, so the answer is unknown.
 #[cfg(target_os = "linux")]
-async fn ydotool_keys(codes: &[&str]) -> Result<()> {
-    // Keep ydotool's documented 12ms default between key events. With 0,
-    // modifier chords (Shift+Insert, Ctrl+V, Ctrl+Shift+V) raced: on a
-    // busy compositor the main key could be interpreted before the
-    // modifier state propagated, so apps saw a bare Insert / V keystroke
-    // and pasted nothing. 3-5 events * 12ms = ~40-60ms total, which is
-    // imperceptible.
-    let output = Command::new("ydotool")
-        .args(["key", "--key-delay", "12"])
-        .args(codes)
+fn classify_ydotool_help(help: &str) -> Option<bool> {
+    if help.contains("separated by plus") {
+        Some(true)
+    } else if help.contains("Usage: key") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn ydotool_is_legacy() -> bool {
+    // Cached only once known, so a paste attempted while ydotoold is down
+    // doesn't pin the wrong syntax for the daemon's lifetime.
+    static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if let Some(&legacy) = LEGACY.get() {
+        return legacy;
+    }
+    let help = Command::new("ydotool")
+        .args(["key", "--help"])
         .output()
-        .await?;
+        .await
+        .map(|o| {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            s
+        })
+        .unwrap_or_default();
+    match classify_ydotool_help(&help) {
+        Some(legacy) => {
+            log::info!("ydotool key syntax: {}", if legacy { "0.1.x" } else { "1.x" });
+            *LEGACY.get_or_init(|| legacy)
+        }
+        None => {
+            log::warn!("couldn't detect ydotool version (is ydotoold running?); assuming 1.x");
+            false
+        }
+    }
+}
+
+/// `ydotool key` arguments for Shift+Insert.
+///
+/// Keep ~12ms between key events. With 0, modifier chords raced: on a busy
+/// compositor the main key could be interpreted before the modifier state
+/// propagated, so apps saw a bare Insert and pasted nothing. 0.1.x splits
+/// `--key-delay` across a chord's press+release, so 24 there is 12ms/event.
+#[cfg(target_os = "linux")]
+fn paste_key_args(legacy: bool) -> &'static [&'static str] {
+    if legacy {
+        &["key", "--key-delay", "24", "shift+insert"]
+    } else {
+        &["key", "--key-delay", "12", "42:1", "110:1", "110:0", "42:0"]
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn ydotool_paste() -> Result<()> {
+    let args = paste_key_args(ydotool_is_legacy().await);
+    let output = Command::new("ydotool").args(args).output().await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(anyhow!("ydotool key: {}", stderr.trim()));
@@ -1303,9 +1358,23 @@ fn run_systemctl_user(args: &[&str]) -> std::io::Result<std::process::ExitStatus
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::{
-        canonical_name_for, cleanup_transcription, parse_key_name, selections_to_write,
-        Selection,
+        canonical_name_for, classify_ydotool_help, cleanup_transcription, parse_key_name,
+        paste_key_args, selections_to_write, Selection,
     };
+
+    #[test]
+    fn detects_ydotool_key_syntax() {
+        let v01 = "Usage: key [--delay <ms>] ...\nEach key sequence can be any number of \
+                   modifiers and keys, separated by plus (+)\n";
+        let v1 = "Usage: key [OPTION]... [KEYCODES]...\nEmit key events.\n";
+        let no_daemon = "failed to connect socket `/tmp/.ydotool_socket': No such file\n";
+        assert_eq!(classify_ydotool_help(v01), Some(true));
+        assert_eq!(classify_ydotool_help(v1), Some(false));
+        assert_eq!(classify_ydotool_help(no_daemon), None);
+        assert_eq!(classify_ydotool_help(""), None);
+        assert_eq!(paste_key_args(true).last(), Some(&"shift+insert"));
+        assert!(paste_key_args(false).contains(&"110:1"));
+    }
 
     #[test]
     fn drops_fillers() {
