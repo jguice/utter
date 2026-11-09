@@ -102,7 +102,10 @@ step "Downloading Parakeet model (~640 MB, skipped if already present)"
 
 step "Starting utter services"
 systemctl --user daemon-reload
-systemctl --user enable --now utter-daemon utter-watcher
+systemctl --user enable utter-daemon utter-watcher
+# restart (not `enable --now`) so an upgrade replaces already-running
+# services with the new binary.
+systemctl --user restart utter-daemon utter-watcher
 
 echo
 echo "${GREEN}${BOLD}Install complete.${RESET}"
