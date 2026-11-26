@@ -36,3 +36,55 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+
+  deb-install:
+    name: deb install (${{ matrix.image }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Covers both ydotool layouts: 0.1.8 + separate ydotoold (Ubuntu
+        # 22.04/24.04, Debian 12) and 1.0.x with ydotoold bundled (Ubuntu
+        # 26.04, Debian 13 backports, Debian testing).
+        image:
+          - ubuntu:22.04
+          - ubuntu:24.04
+          - ubuntu:26.04
+          - debian:12
+          - debian:13
+          - debian:testing
+    env:
+      NFPM_VERSION: 2.46.3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install nfpm
+        run: |
+          curl -sSfL \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_amd64.deb" \
+            -o /tmp/nfpm.deb
+          sudo dpkg -i /tmp/nfpm.deb
+
+      - name: Build .deb around a stub binary
+        working-directory: packaging
+        run: |
+          mkdir -p ../target/release ../dist
+          printf '#!/bin/sh\nexit 0\n' > ../target/release/utter
+          chmod 755 ../target/release/utter
+          UTTER_VERSION=0.0.0 UTTER_ARCH=amd64 nfpm pkg --packager deb --target ../dist/
+
+      - name: Install the .deb in the container
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm -v "$PWD/dist:/dist:ro" "$IMAGE" sh -euc '
+            if [ "$(. /etc/os-release; echo "${VERSION_CODENAME:-}")" = trixie ]; then
+              echo "deb http://deb.debian.org/debian trixie-backports main" \
+                > /etc/apt/sources.list.d/backports.list
+            fi
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              /dist/utter_0.0.0_amd64.deb
+            dpkg-query -W ydotool
+            command -v ydotoold
+          '

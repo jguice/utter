@@ -13,9 +13,9 @@
 #   2. Fetch the latest utter release from GitHub.
 #   3. Download the right .rpm or .deb for your distro+arch.
 #   4. Install it via dnf / apt (pulls in ydotool, alsa-utils, wl-clipboard,
-#      libnotify as deps — plus ydotoold on Debian/Ubuntu, where the daemon
-#      ships in a separate package; drops udev + systemd files; enables
-#      ydotool).
+#      libnotify as deps — plus ydotoold on Debian/Ubuntu releases where the
+#      daemon ships in a separate package; drops udev + systemd files;
+#      enables ydotool).
 #   5. Download the Parakeet model (~640 MB) as your user.
 #   6. Start utter-daemon and utter-watcher in your current session.
 
@@ -90,6 +90,9 @@ curl -fsSL --progress-bar -o "$TMPFILE" "$URL" || \
 step "Installing (sudo)"
 if [[ "$PKG_FORMAT" == "deb" ]]; then
   sudo apt-get update -qq
+  if ! apt-cache policy ydotool 2>/dev/null | grep -q 'Candidate: [0-9]'; then
+    fail "ydotool isn't available from your apt sources. On Debian 13 (trixie) it's only in backports — enable trixie-backports (https://backports.debian.org/Instructions/) and re-run."
+  fi
   sudo apt-get install -y "$TMPFILE"
 else
   "${INSTALL_CMD[@]}" "$TMPFILE"

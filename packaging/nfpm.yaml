@@ -90,7 +90,9 @@ overrides:
   deb:
     depends:
       - ydotool
-      - ydotoold
+      # ydotool 1.0.x (Ubuntu 26.04+, Debian 14+, trixie-backports) ships
+      # ydotoold in the ydotool package and drops the separate ydotoold package.
+      - ydotoold | ydotool (>= 1.0)
       - alsa-utils
       - wl-clipboard
       - libnotify-bin
