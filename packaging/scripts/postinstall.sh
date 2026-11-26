@@ -42,6 +42,22 @@ if command -v systemctl >/dev/null 2>&1; then
     # installs too.
     systemctl restart ydotool.service || true
 
+    # ydotool 1.0.x packages ship and globally enable a user-session
+    # ydotool.service. It would run a second ydotoold next to ours, so turn
+    # it off and remember to restore it on uninstall.
+    if [ -f /usr/lib/systemd/user/ydotool.service ] \
+        && systemctl --global is-enabled ydotool.service >/dev/null 2>&1
+    then
+        systemctl --global disable ydotool.service || true
+        mkdir -p /var/lib/utter
+        touch /var/lib/utter/ydotool-user-unit-disabled
+        for uid in $(loginctl list-sessions --no-legend 2>/dev/null | awk '{print $2}' | sort -u); do
+            user="$(getent passwd "$uid" | cut -d: -f1)"
+            [ -n "$user" ] && su -s /bin/sh "$user" -c \
+                'systemctl --user stop ydotool.service' 2>/dev/null || true
+        done
+    fi
+
     # --global enables the user services for every user on their next login.
     # Already-logged-in sessions need `systemctl --user daemon-reload` + start.
     systemctl --global enable utter-daemon.service utter-watcher.service || true

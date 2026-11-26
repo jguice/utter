@@ -34,6 +34,8 @@ sudo dnf install ./utter-*.rpm
 sudo apt install ./utter_*.deb
 ```
 
+Debian 13 (trixie) has no `ydotool` in its main archive, only in `trixie-backports`. [Enable backports](https://backports.debian.org/Instructions/) first; the install above then works as-is. Ubuntu 22.04+, Debian 11/12, and Debian 14+ need nothing extra.
+
 The package pulls in its runtime deps (`ydotool`, `alsa-utils`, `wl-clipboard`, `libnotify`), drops a udev rule for keyboard access via `uaccess` (no `usermod` needed), registers systemd user services, and configures the ydotool socket. It does **not** start the services or fetch the model — do that now:
 
 ```bash
